@@ -45,6 +45,7 @@ void KeyboardHook::Uninstall()
     }
     thread_id_ = 0;
     d_down_ = false;
+    d_intercepted_ = false;
 }
 
 LRESULT CALLBACK KeyboardHook::KeyboardProc(int code, WPARAM message, LPARAM data)
@@ -60,19 +61,41 @@ LRESULT CALLBACK KeyboardHook::KeyboardProc(int code, WPARAM message, LPARAM dat
     }
 
     if (message == WM_KEYUP || message == WM_SYSKEYUP) {
+        const bool intercepted = self->d_intercepted_;
         self->d_down_ = false;
+        self->d_intercepted_ = false;
+        if (intercepted) {
+            return 1;
+        }
     }
     else if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
+        if (self->d_down_) {
+            return self->d_intercepted_
+                ? 1 : CallNextHookEx(self->hook_, code, message, data);
+        }
+        self->d_down_ = true;
+
         const bool win_down = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0
             || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
         const bool extra_modifier = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0
             || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0
             || (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
-        if (!self->d_down_ && win_down && !extra_modifier) {
-            PostThreadMessageW(self->thread_id_, WinDMessage, 0, 0);
+        if (win_down && !extra_modifier
+            && PostThreadMessageW(self->thread_id_, WinDMessage, 0, 0)) {
+            self->d_intercepted_ = true;
+
+            // Mark Win as used so releasing it does not open the Start menu.
+            // 0xFF is the unused key employed for this purpose by PowerToys.
+            INPUT dummy_keys[2]{};
+            for (auto& key : dummy_keys) {
+                key.type = INPUT_KEYBOARD;
+                key.ki.wVk = 0xFF;
+            }
+            dummy_keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(ARRAYSIZE(dummy_keys), dummy_keys, sizeof(INPUT));
+            return 1;
         }
-        self->d_down_ = true;
     }
 
     return CallNextHookEx(self->hook_, code, message, data);

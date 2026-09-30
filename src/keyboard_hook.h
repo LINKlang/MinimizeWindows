@@ -16,7 +16,7 @@ public:
     KeyboardHook& operator=(const KeyboardHook&) = delete;
 
     // Install/uninstall on the same thread, which must pump a message loop.
-    // Win+D posts WinDMessage to that thread; keyboard input is never swallowed.
+    // Successfully posting WinDMessage consumes that D press through key-up.
     bool Install();
     void Uninstall();
 
@@ -27,4 +27,5 @@ private:
     HHOOK hook_ = nullptr;
     DWORD thread_id_ = 0;
     bool d_down_ = false;
+    bool d_intercepted_ = false;
 };

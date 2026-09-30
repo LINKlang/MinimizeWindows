@@ -1,11 +1,12 @@
 #include "keyboard_hook.h"
+#include "desktop_manager.h"
 
 int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 {
+    DesktopManager desktop_manager;
     KeyboardHook keyboard_hook;
     if (!keyboard_hook.Install()) {
-        MessageBoxW(nullptr, L"Keyboard hook installation failed.",
-            L"MinimizeWindows", MB_OK | MB_ICONERROR);
+        OutputDebugStringW(L"MinimizeWindows: keyboard hook installation failed.\n");
         return 1;
     }
 
@@ -13,9 +14,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     int result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {
         if (message.hwnd == nullptr && message.message == KeyboardHook::WinDMessage) {
-            // Keep the dialog outside KeyboardProc so the hook returns promptly.
-            MessageBoxW(nullptr, L"Win+D detected.", L"MinimizeWindows",
-                MB_OK | MB_ICONINFORMATION);
+            desktop_manager.ToggleDesktop();
         }
         else {
             TranslateMessage(&message);
