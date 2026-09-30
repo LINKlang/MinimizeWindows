@@ -12,6 +12,80 @@
 
 namespace {
 
+const wchar_t* const UsageText =
+    L"Usage:\n"
+    L"  MinimizeWindows.exe                        Use the primary monitor at startup\n"
+    L"  MinimizeWindows.exe --monitor \"\\\\.\\DISPLAY2\"  Use the specified GDI device\n"
+    L"  MinimizeWindows.exe --list-monitors        List active displays and exit\n"
+    L"  MinimizeWindows.exe --help                 Show this help and exit\n"
+    L"\nChoose a GDI device name from --list-monitors, not a display number.\n"
+    L"The selected device stays fixed until the program exits.\n";
+
+struct CommandLineOptions {
+    enum class Mode { Run, ListMonitors, Help };
+    Mode mode = Mode::Run;
+    std::wstring monitor_device;
+};
+
+bool ParseOptions(int argument_count, const wchar_t* const* arguments,
+    CommandLineOptions& options, std::wstring& error)
+{
+    options = {};
+    error.clear();
+    bool monitor_seen = false;
+    bool mode_seen = false;
+    for (int index = 1; index < argument_count; ++index) {
+        const wchar_t* argument = arguments[index];
+        if (std::wcscmp(argument, L"--monitor") == 0) {
+            if (monitor_seen || mode_seen) {
+                error = L"--monitor must appear once and cannot be combined with --help or --list-monitors.";
+                return false;
+            }
+            if (index + 1 >= argument_count || arguments[index + 1][0] == L'\0'
+                || std::wcsncmp(arguments[index + 1], L"--", 2) == 0) {
+                error = L"--monitor requires a GDI device name.";
+                return false;
+            }
+            monitor_seen = true;
+            options.monitor_device = arguments[++index];
+        }
+        else if (std::wcscmp(argument, L"--list-monitors") == 0
+            || std::wcscmp(argument, L"--help") == 0) {
+            if (mode_seen || monitor_seen) {
+                error = L"--help and --list-monitors must be used alone.";
+                return false;
+            }
+            mode_seen = true;
+            options.mode = std::wcscmp(argument, L"--help") == 0
+                ? CommandLineOptions::Mode::Help : CommandLineOptions::Mode::ListMonitors;
+        }
+        else {
+            error = std::wstring(L"Unknown argument: ") + argument;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SelectMonitorTarget(const MonitorSnapshot& snapshot, const std::wstring& requested_device,
+    MonitorTarget& target, std::wstring& error)
+{
+    target = {};
+    error.clear();
+    for (const auto& monitor : snapshot.monitors) {
+        const bool selected = requested_device.empty() ? monitor.primary
+            : _wcsicmp(monitor.device_name.c_str(), requested_device.c_str()) == 0;
+        if (selected && !monitor.device_name.empty() && monitor.handle != nullptr) {
+            // Default and explicit selection both produce the same device value.
+            target.device_name = monitor.device_name;
+            return true;
+        }
+    }
+    error = requested_device.empty() ? L"No active primary monitor is available."
+        : L"Monitor \"" + requested_device + L"\" is not available. Use --list-monitors to find an active GDI device.";
+    return false;
+}
+
 bool UsableOutput(HANDLE handle)
 {
     return handle != nullptr && handle != INVALID_HANDLE_VALUE
@@ -194,6 +268,29 @@ std::wstring FormatError(const wchar_t* operation, DWORD error)
     return message;
 }
 
+int ReportStartupError(const std::wstring& error)
+{
+    const std::wstring message = L"MinimizeWindows: " + error + L"\n\n" + UsageText;
+    ConsoleOutput console;
+    if (console.Initialize()) { WriteText(console.error, message); }
+    else { OutputDebugStringW(message.c_str()); }
+    return 1;
+}
+
+int PrintHelp()
+{
+    ConsoleOutput console;
+    if (!console.Initialize()) {
+        return ReportStartupError(FormatError(L"Console output initialization", GetLastError()));
+    }
+    if (!WriteText(console.output, UsageText)) {
+        const DWORD error = GetLastError();
+        WriteText(console.error, FormatError(L"Help output", error));
+        return 1;
+    }
+    return 0;
+}
+
 int ListMonitors()
 {
     ConsoleOutput console;
@@ -224,17 +321,31 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     int argument_count = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
     if (arguments == nullptr) {
-        return 1;
+        return ReportStartupError(FormatError(L"Command line parsing", GetLastError()));
     }
-    bool list_monitors = false;
-    for (int index = 1; index < argument_count; ++index) {
-        if (std::wcscmp(arguments[index], L"--list-monitors") == 0) {
-            list_monitors = true;
-        }
-    }
+    CommandLineOptions options;
+    std::wstring error;
+    const bool parsed = ParseOptions(argument_count, arguments, options, error);
     LocalFree(arguments);
-    if (list_monitors) {
+    if (!parsed) {
+        return ReportStartupError(error);
+    }
+    if (options.mode == CommandLineOptions::Mode::ListMonitors) {
         return ListMonitors();
+    }
+    if (options.mode == CommandLineOptions::Mode::Help) {
+        return PrintHelp();
+    }
+
+    MonitorTarget target;
+    {
+        MonitorSnapshot snapshot;
+        if (!MonitorEnumerator{}.Enumerate(snapshot)) {
+            return ReportStartupError(FormatError(L"Monitor enumeration", GetLastError()));
+        }
+        if (!SelectMonitorTarget(snapshot, options.monitor_device, target, error)) {
+            return ReportStartupError(error);
+        }
     }
 
     DesktopManager desktop_manager;
@@ -248,7 +359,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     int result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {
         if (message.hwnd == nullptr && message.message == KeyboardHook::WinDMessage) {
-            desktop_manager.ToggleDesktop();
+            desktop_manager.ToggleDesktop(target);
         }
         else {
             TranslateMessage(&message);

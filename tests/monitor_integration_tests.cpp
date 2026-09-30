@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 namespace {
 
@@ -20,10 +21,78 @@ bool EqualBounds(const RECT& left, const RECT& right)
     return EqualRect(&left, &right) != FALSE;
 }
 
+bool ParseArguments(std::initializer_list<const wchar_t*> arguments,
+    CommandLineOptions& options, std::wstring& error)
+{
+    return ParseOptions(static_cast<int>(arguments.size()), arguments.begin(), options, error);
+}
+
+void TestOptionsAndSelection()
+{
+    CommandLineOptions options;
+    std::wstring error;
+    Require(ParseArguments({L"app.exe"}, options, error)
+        && options.mode == CommandLineOptions::Mode::Run && options.monitor_device.empty(),
+        "no arguments select default startup monitor");
+    Require(ParseArguments({L"app.exe", L"--monitor", L"\\\\.\\display2"}, options, error)
+        && options.mode == CommandLineOptions::Mode::Run && options.monitor_device == L"\\\\.\\display2",
+        "explicit monitor name accepted");
+    Require(ParseArguments({L"app.exe", L"--help"}, options, error)
+        && options.mode == CommandLineOptions::Mode::Help, "help is an exit mode");
+    Require(ParseArguments({L"app.exe", L"--list-monitors"}, options, error)
+        && options.mode == CommandLineOptions::Mode::ListMonitors, "listing is an exit mode");
+
+    const std::vector<std::vector<const wchar_t*>> invalid = {
+        {L"app.exe", L"--monitor"},
+        {L"app.exe", L"--monitor", L""},
+        {L"app.exe", L"--monitor", L"--help"},
+        {L"app.exe", L"--monitor", L"\\\\.\\DISPLAY1", L"--monitor", L"\\\\.\\DISPLAY2"},
+        {L"app.exe", L"--help", L"--monitor", L"\\\\.\\DISPLAY1"},
+        {L"app.exe", L"--monitor", L"\\\\.\\DISPLAY1", L"--help"},
+        {L"app.exe", L"--list-monitors", L"--monitor", L"\\\\.\\DISPLAY1"},
+        {L"app.exe", L"--monitor", L"\\\\.\\DISPLAY1", L"--list-monitors"},
+        {L"app.exe", L"--help", L"--list-monitors"},
+        {L"app.exe", L"--list-monitors", L"--list-monitors"},
+        {L"app.exe", L"--unknown"},
+        {L"app.exe", L"2"}
+    };
+    for (const auto& arguments : invalid) {
+        Require(!ParseOptions(static_cast<int>(arguments.size()), arguments.data(), options, error)
+            && !error.empty(), "invalid arguments report an error");
+    }
+
+    MonitorSnapshot snapshot;
+    MonitorInfo secondary;
+    secondary.device_name = L"\\\\.\\DISPLAY2";
+    secondary.handle = reinterpret_cast<HMONITOR>(2);
+    MonitorInfo primary;
+    primary.device_name = L"\\\\.\\DISPLAY1";
+    primary.handle = reinterpret_cast<HMONITOR>(1);
+    primary.primary = true;
+    snapshot.monitors = {secondary, primary, primary}; // Clones share a logical primary source.
+    MonitorTarget target;
+    Require(SelectMonitorTarget(snapshot, L"", target, error) && target.device_name == primary.device_name,
+        "default selection finds primary even if it is not first and has cloned outputs");
+    Require(SelectMonitorTarget(snapshot, L"\\\\.\\display2", target, error)
+        && target.device_name == secondary.device_name, "selection canonicalizes case-insensitive device name");
+    Require(!SelectMonitorTarget(snapshot, L"2", target, error) && target.device_name.empty(),
+        "debug or settings number cannot select a device");
+    Require(!SelectMonitorTarget(snapshot, L"\\\\.\\DISPLAY99", target, error) && !error.empty(),
+        "unknown target is rejected");
+    snapshot.monitors = {secondary};
+    Require(!SelectMonitorTarget(snapshot, L"", target, error), "missing primary does not select another monitor");
+    snapshot.monitors[0].handle = nullptr;
+    Require(!SelectMonitorTarget(snapshot, secondary.device_name, target, error),
+        "target without a runtime handle is unavailable");
+    snapshot.monitors.clear();
+    Require(!SelectMonitorTarget(snapshot, L"", target, error), "empty topology cannot start the hook");
+}
+
 } // namespace
 
 int main()
 {
+    TestOptionsAndSelection();
     using GetContext = HANDLE (WINAPI*)();
     using SetContext = HANDLE (WINAPI*)(HANDLE);
     const HMODULE user32 = GetModuleHandleW(L"user32.dll");
@@ -94,6 +163,6 @@ int main()
     std::wstring decoded(size, L'\0');
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), &decoded[0], size);
     Require(decoded == formatted, "UTF-8 output round-trips Chinese and surrogate pairs");
-    std::printf("Native monitor/Unicode tests passed (%zu display(s)).\n", snapshot.monitors.size());
+    std::printf("Monitor options/selection and native Unicode tests passed (%zu display(s)).\n", snapshot.monitors.size());
     return 0;
 }

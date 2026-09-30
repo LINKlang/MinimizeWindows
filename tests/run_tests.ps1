@@ -26,12 +26,12 @@ try {
         throw 'Behavior tests failed.'
     }
 
-    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /Fe:"' + $testOutput + '\window_integration_tests.exe" /Fo:build\tests\ tests\window_integration_tests.cpp src\desktop_manager.cpp src\keyboard_hook.cpp user32.lib dwmapi.lib'
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /Fe:"' + $testOutput + '\window_integration_tests.exe" /Fo:build\tests\ tests\window_integration_tests.cpp src\desktop_manager.cpp src\keyboard_hook.cpp user32.lib dwmapi.lib imm32.lib'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) {
         throw 'Compiling native window tests failed.'
     }
-    & (Join-Path $testOutput 'window_integration_tests.exe')
+    & (Join-Path $testOutput 'window_integration_tests.exe') (Join-Path $projectRoot 'Release\MinimizeWindows.exe')
     if ($LASTEXITCODE -ne 0) {
         throw 'Native window tests failed.'
     }

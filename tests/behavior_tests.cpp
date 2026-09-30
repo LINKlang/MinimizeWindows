@@ -32,8 +32,17 @@ struct Window {
     DWORD cloaked = 0;
     HRESULT dwm_result = S_OK;
     bool fail_show = false;
+    HMONITOR monitor = nullptr;
 };
 
+struct Monitor {
+    std::wstring device_name;
+    RECT bounds;
+    bool alive = true;
+    bool fail_info = false;
+};
+
+std::deque<Monitor> monitors;
 std::deque<Window> windows;
 std::vector<std::pair<HWND, int>> commands;
 HWND desktop = nullptr;
@@ -41,10 +50,25 @@ HWND shell = nullptr;
 int enum_calls = 0;
 int fail_enum_call = 0;
 void (*before_second_enum)() = nullptr;
+void (*after_first_enum)() = nullptr;
+bool fail_monitor_enum = false;
+int monitor_enum_calls = 0;
 
-HWND AddWindow()
+HMONITOR AddMonitor(const wchar_t* device_name, RECT bounds)
+{
+    monitors.push_back({device_name, bounds});
+    return reinterpret_cast<HMONITOR>(&monitors.back());
+}
+
+HMONITOR MonitorAt(size_t index)
+{
+    return reinterpret_cast<HMONITOR>(&monitors[index]);
+}
+
+HWND AddWindow(HMONITOR monitor = nullptr)
 {
     windows.emplace_back();
+    windows.back().monitor = monitor != nullptr ? monitor : MonitorAt(0);
     return reinterpret_cast<HWND>(&windows.back());
 }
 
@@ -90,6 +114,43 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD, PVOID output, DWORD)
     return window.dwm_result;
 }
 
+BOOL WINAPI EnumDisplayMonitors(HDC dc, LPCRECT clip, MONITORENUMPROC callback, LPARAM data)
+{
+    Check(dc == nullptr && clip == nullptr, "resolve target across the whole desktop");
+    ++monitor_enum_calls;
+    if (fail_monitor_enum) { return FALSE; }
+    for (auto& monitor : monitors) {
+        if (monitor.alive && !callback(reinterpret_cast<HMONITOR>(&monitor), nullptr, &monitor.bounds, data)) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+BOOL WINAPI GetMonitorInfoW(HMONITOR handle, LPMONITORINFOEXW info)
+{
+    for (auto& monitor : monitors) {
+        if (reinterpret_cast<HMONITOR>(&monitor) == handle && monitor.alive && !monitor.fail_info) {
+            Check(info->cbSize == sizeof(*info), "monitor info size initialized");
+            info->rcMonitor = info->rcWork = monitor.bounds;
+            wcscpy_s(info->szDevice, monitor.device_name.c_str());
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+HMONITOR WINAPI MonitorFromWindow(HWND hwnd, DWORD flags)
+{
+    Check(flags == MONITOR_DEFAULTTONEAREST, "use largest intersection or nearest monitor");
+    // The OS uses the pre-minimize rectangle; a minimized window keeps its monitor.
+    const HMONITOR handle = GetWindow(hwnd).monitor;
+    for (auto& monitor : monitors) {
+        if (reinterpret_cast<HMONITOR>(&monitor) == handle && monitor.alive) { return handle; }
+    }
+    return nullptr;
+}
+
 BOOL WINAPI EnumWindows(WNDENUMPROC callback, LPARAM data)
 {
     ++enum_calls;
@@ -104,6 +165,7 @@ BOOL WINAPI EnumWindows(WNDENUMPROC callback, LPARAM data)
             return FALSE;
         }
     }
+    if (enum_calls == 1 && after_first_enum != nullptr) { after_first_enum(); }
     return TRUE;
 }
 
@@ -121,12 +183,18 @@ BOOL WINAPI ShowWindowAsync(HWND hwnd, int command)
 void ResetWindows()
 {
     windows.clear();
+    monitors.clear();
+    AddMonitor(L"\\\\.\\DISPLAY1", {0, 0, 2560, 1440});
+    AddMonitor(L"\\\\.\\DISPLAY2", {-1080, -559, 0, 1361});
     commands.clear();
     desktop = nullptr;
     shell = nullptr;
     enum_calls = 0;
     fail_enum_call = 0;
     before_second_enum = nullptr;
+    after_first_enum = nullptr;
+    fail_monitor_enum = false;
+    monitor_enum_calls = 0;
 }
 
 std::array<SHORT, 256> keys{};
@@ -205,6 +273,9 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #define DwmGetWindowAttribute test::DwmGetWindowAttribute
 #define EnumWindows test::EnumWindows
 #define ShowWindowAsync test::ShowWindowAsync
+#define EnumDisplayMonitors test::EnumDisplayMonitors
+#define GetMonitorInfoW test::GetMonitorInfoW
+#define MonitorFromWindow test::MonitorFromWindow
 #include "../src/desktop_manager.cpp"
 #undef IsWindow
 #undef IsWindowVisible
@@ -216,6 +287,9 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #undef DwmGetWindowAttribute
 #undef EnumWindows
 #undef ShowWindowAsync
+#undef EnumDisplayMonitors
+#undef GetMonitorInfoW
+#undef MonitorFromWindow
 
 #define SetWindowsHookExW test::SetWindowsHookExW
 #define UnhookWindowsHookEx test::UnhookWindowsHookEx
@@ -239,26 +313,42 @@ void TestDesktop()
 {
     using namespace test;
     DesktopManager manager;
+    const MonitorTarget target{L"\\\\.\\DISPLAY1"};
+    const MonitorTarget second{L"\\\\.\\display2"};
     ResetWindows();
     const HWND chrome = AddWindow();
     const HWND code = AddWindow();
-    manager.ToggleDesktop();
+    const HWND foreign = AddWindow(MonitorAt(1));
+    const HWND foreign_manual = AddWindow(MonitorAt(1));
+    GetWindow(foreign_manual).minimized = true;
+    manager.ToggleDesktop(target);
     Check(GetWindow(chrome).minimized && GetWindow(code).minimized,
-        "all ordinary windows minimized");
+        "all target ordinary windows minimized");
+    Check(!GetWindow(foreign).minimized && GetWindow(foreign_manual).minimized,
+        "other monitor remains unchanged during minimize");
     const HWND notepad = AddWindow();
     commands.clear();
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(commands.size() == 1 && commands[0].first == notepad
         && commands[0].second == SW_MINIMIZE, "new window causes another minimize");
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(!GetWindow(chrome).minimized && !GetWindow(code).minimized
-        && !GetWindow(notepad).minimized, "clean desktop restores every minimized window");
+        && !GetWindow(notepad).minimized, "foreign visible window does not stop target restoration");
+    Check(GetWindow(foreign_manual).minimized, "restoration leaves other monitor's minimized windows alone");
+    commands.clear();
+    manager.ToggleDesktop(second);
+    Check(commands.size() == 1 && commands[0].first == foreign && GetWindow(foreign_manual).minimized,
+        "case-insensitive target selects a non-primary monitor");
+    commands.clear();
+    manager.ToggleDesktop(second);
+    Check(commands.size() == 2 && !GetWindow(foreign).minimized && !GetWindow(foreign_manual).minimized,
+        "second monitor restores all its minimized windows regardless of first monitor");
 
     ResetWindows();
     const HWND manual = AddWindow();
     GetWindow(manual).minimized = true;
     DesktopManager fresh_manager;
-    fresh_manager.ToggleDesktop();
+    fresh_manager.ToggleDesktop(target);
     Check(!GetWindow(manual).minimized && commands[0].second == SW_RESTORE,
         "fresh manager restores manually minimized window without history");
 
@@ -274,36 +364,36 @@ void TestDesktop()
     GetWindow(AddWindow()).cloaked = DWM_CLOAKED_SHELL;
     const HWND ordinary = AddWindow();
     GetWindow(ordinary).minimized = true;
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(commands.size() == 1 && commands[0].first == ordinary
         && commands[0].second == SW_RESTORE, "shell, hidden, tool, child and cloaked windows ignored");
 
     ResetWindows();
     const HWND unsupported_dwm = AddWindow();
     GetWindow(unsupported_dwm).dwm_result = E_INVALIDARG;
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(GetWindow(unsupported_dwm).minimized, "unsupported DWM query retains basic filtering");
 
     ResetWindows();
     AddWindow();
     fail_enum_call = 1;
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(commands.empty() && enum_calls == 1, "failed scan performs no window operation");
     enum_calls = 0;
     fail_enum_call = 2;
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(commands.empty(), "failed action enumeration is harmless");
 
     ResetWindows();
     const HWND failed = AddWindow();
     const HWND successful = AddWindow();
     GetWindow(failed).fail_show = true;
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(!GetWindow(failed).minimized && GetWindow(successful).minimized,
         "one failed operation does not block other windows");
     GetWindow(failed).fail_show = false;
     commands.clear();
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(commands.size() == 1 && commands[0].second == SW_MINIMIZE,
         "next press follows actual window state after failure");
 
@@ -311,12 +401,58 @@ void TestDesktop()
     AddWindow();
     AddWindow();
     before_second_enum = [] { windows.front().alive = false; };
-    manager.ToggleDesktop();
+    manager.ToggleDesktop(target);
     Check(commands.size() == 1 && windows.back().minimized,
         "window closed between enumerations is skipped");
 
     ResetWindows();
-    manager.ToggleDesktop();
+    AddWindow();
+    const HWND stays = AddWindow();
+    before_second_enum = [] { windows.front().monitor = MonitorAt(1); };
+    manager.ToggleDesktop(target);
+    Check(commands.size() == 1 && commands[0].first == stays,
+        "window moved to another monitor between enumerations is skipped");
+
+    ResetWindows();
+    const HWND reconnect = AddWindow();
+    manager.ToggleDesktop(target);
+    commands.clear();
+    monitors.front().alive = false;
+    manager.ToggleDesktop(target);
+    Check(commands.empty(), "disconnected target never falls back to another monitor");
+    const HMONITOR replacement = AddMonitor(L"\\\\.\\DISPLAY1", {2000, -1000, 4560, 440});
+    GetWindow(reconnect).monitor = replacement;
+    manager.ToggleDesktop(target);
+    Check(!GetWindow(reconnect).minimized && commands.size() == 1 && monitor_enum_calls == 3,
+        "reconnected device is resolved to its new handle on every press");
+
+    ResetWindows();
+    AddWindow();
+    fail_monitor_enum = true;
+    manager.ToggleDesktop(target);
+    Check(commands.empty() && enum_calls == 0, "failed monitor enumeration performs no window operation");
+    fail_monitor_enum = false;
+    monitors.back().fail_info = true;
+    manager.ToggleDesktop(target);
+    Check(commands.empty() && enum_calls == 0, "incomplete monitor lookup performs no window operation");
+
+    ResetWindows();
+    AddWindow();
+    after_first_enum = [] { monitors.front().alive = false; };
+    manager.ToggleDesktop(target);
+    Check(commands.empty() && enum_calls == 1, "target disconnected during scan cancels the action");
+
+    ResetWindows();
+    AddWindow();
+    after_first_enum = [] { monitors.front().device_name = L"\\\\.\\DISPLAY3"; };
+    manager.ToggleDesktop(target);
+    Check(commands.empty() && enum_calls == 1, "reassigned monitor handle during scan cancels the action");
+
+    ResetWindows();
+    manager.ToggleDesktop(MonitorTarget{});
+    manager.ToggleDesktop(MonitorTarget{L"\\\\.\\DISPLAY99"});
+    Check(commands.empty() && enum_calls == 0, "empty or unknown device is never interpreted as primary");
+    manager.ToggleDesktop(target);
     Check(commands.empty(), "empty desktop is a no-op");
 }
 
