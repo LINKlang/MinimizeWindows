@@ -1,8 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <dwmapi.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <vector>
 
 #include "../src/desktop_manager.h"
@@ -39,6 +41,18 @@ void WaitFor(Predicate predicate, const char* message)
         }
         Sleep(10);
     } while (GetTickCount64() < deadline);
+    EnumWindows([](HWND window, LPARAM) -> BOOL {
+        wchar_t name[128];
+        GetClassNameW(window, name, ARRAYSIZE(name));
+        DWORD cloaked = 0;
+        DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+        DWORD process_id = 0;
+        GetWindowThreadProcessId(window, &process_id);
+        std::fwprintf(stderr, L"Window %p class=%ls pid=%lu visible=%d minimized=%d cloaked=%lu exstyle=%lx\n",
+            window, name, process_id, IsWindowVisible(window), IsIconic(window), cloaked,
+            static_cast<unsigned long>(GetWindowLongPtrW(window, GWL_EXSTYLE)));
+        return TRUE;
+    }, 0);
     Check(false, message);
 }
 
@@ -93,7 +107,8 @@ int main()
 
     const HWND notepad = create_window(monitors.front());
     manager.ToggleDesktop();
-    WaitFor([&] { return IsIconic(notepad); }, "new window causes another minimize");
+    WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(manual) && IsIconic(notepad); },
+        "new window causes another minimize");
     Check(IsIconic(chrome) && IsIconic(code), "previous windows stay minimized");
 
     DesktopManager fresh_manager;
