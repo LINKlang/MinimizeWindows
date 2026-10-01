@@ -33,6 +33,12 @@
     <ClCompile Include="..\src\settings_window.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\display_model.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\display_page.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\keyboard_hook.h">
@@ -51,6 +57,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="..\src\wtl_support.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\display_model.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\display_page.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

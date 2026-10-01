@@ -33,9 +33,10 @@ try {
     & (Join-Path $testOutput 'startup_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Startup tests failed.' }
 
-    $uiFlags = ' /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /I"' + $wtlInclude + '" '
+    $uiFlags = ' /utf-8 /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /I"' + $wtlInclude + '" '
     $uiLibraries = ' user32.lib gdi32.lib dwmapi.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib imm32.lib'
-    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_tests.exe" /Fo:"' + $testOutput + '\tray_tests.obj" tests\tray_tests.cpp' + $uiLibraries + ' /link /subsystem:console /manifest:embed'
+    $displaySources = ' src\display_model.cpp src\display_page.cpp src\monitor_enumerator.cpp'
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_tests.exe" /Fo:build\tests\ tests\tray_tests.cpp' + $displaySources + $uiLibraries + ' /link /subsystem:console /manifest:embed'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling WTL tray tests failed.' }
     $trayStart = New-Object System.Diagnostics.ProcessStartInfo
@@ -58,7 +59,13 @@ try {
     }
     finally { $trayTestProcess.Dispose() }
 
-    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_test_app.exe" /Fo:build\tests\ tests\tray_test_app.cpp src\main.cpp src\settings_window.cpp src\desktop_manager.cpp src\keyboard_hook.cpp src\monitor_enumerator.cpp' + $uiLibraries + ' /link /subsystem:windows /manifest:embed'
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\display_tests.exe" /Fo:build\tests\ tests\display_tests.cpp src\display_model.cpp src\settings_window.cpp src\monitor_enumerator.cpp' + $uiLibraries + ' /link /subsystem:console /manifest:embed'
+    & $env:ComSpec /d /s /c $compile
+    if ($LASTEXITCODE -ne 0) { throw 'Compiling Display page tests failed.' }
+    & (Join-Path $testOutput 'display_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Display page tests failed.' }
+
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_test_app.exe" /Fo:build\tests\ tests\tray_test_app.cpp src\main.cpp src\settings_window.cpp src\desktop_manager.cpp src\keyboard_hook.cpp' + $displaySources + $uiLibraries + ' /link /subsystem:windows /manifest:embed'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling isolated tray app failed.' }
 

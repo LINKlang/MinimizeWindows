@@ -105,7 +105,7 @@ private:
 
     void ShowSettings()
     {
-        if (!closing_ && !settings_.Show(icon_)) {
+        if (!closing_ && !settings_.Show(icon_, target_)) {
             OutputDebugStringW(L"MinimizeWindows: settings window creation failed.\n");
         }
     }
@@ -118,7 +118,7 @@ private:
         if (!GetCursorPos(&point)) { return; }
         const HMENU menu = CreatePopupMenu();
         if (menu == nullptr) { return; }
-        AppendMenuW(menu, MF_STRING, ExitCommand, L"\u9000\u51fa");
+        AppendMenuW(menu, MF_STRING, ExitCommand, L"Exit");
         ::SetForegroundWindow(m_hWnd);
         const UINT command = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
             point.x, point.y, m_hWnd, nullptr);

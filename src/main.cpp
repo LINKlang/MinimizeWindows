@@ -257,7 +257,7 @@ std::wstring FormatError(const wchar_t* operation, DWORD error)
 {
     LPWSTR description = nullptr;
     FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
-        | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0,
+        | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
         reinterpret_cast<LPWSTR>(&description), 0, nullptr);
     std::wstring message = std::wstring(operation) + L" failed (Win32 error "
         + std::to_wstring(error) + L"). ";

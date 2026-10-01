@@ -95,7 +95,7 @@ UINT WINAPI Menu(HMENU menu, UINT flags, int x, int y, HWND owner, LPTPMPARAMS)
     Stage("Tray lifecycle: menu callback received");
     wchar_t label[16];
     GetMenuStringW(menu, 0, label, ARRAYSIZE(label), MF_BYPOSITION);
-    Check(GetMenuItemCount(menu) == 1 && std::wcscmp(label, L"\u9000\u51fa") == 0
+    Check(GetMenuItemCount(menu) == 1 && std::wcscmp(label, L"Exit") == 0
         && (flags & TPM_RETURNCMD) != 0, "context menu contains only Exit");
     if (menu_action == MenuAction::CoreThenCancel) {
         Check(PostMessageW(owner, KeyboardHook::WinDMessage, 0, 0) != FALSE, "post core message during modal menu");
@@ -183,7 +183,7 @@ int main()
         Check(window != nullptr && IsWindowVisible(window), "double-click opens settings");
         wchar_t title[80];
         GetWindowTextW(window, title, ARRAYSIZE(title));
-        Check(std::wcscmp(title, L"MinimizeWindows \u2014 \u8bbe\u7f6e") == 0, "settings Unicode title is correct");
+        Check(std::wcscmp(title, L"MinimizeWindows \u2014 Settings") == 0, "settings title is correct");
         TrayEvent(WM_LBUTTONDBLCLK);
         Check(Settings() == window, "repeat double-click reuses the existing frame");
         TrayEvent(NIN_KEYSELECT);
