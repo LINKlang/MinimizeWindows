@@ -402,7 +402,7 @@ struct DesktopFixture {
         test::ResetWindows();
         test::Check(manager.StartTracking(), "start restore tracking for fixture");
     }
-    void Toggle() { manager.ToggleDesktop(primary); }
+    void Toggle() { manager.ToggleDesktop({primary}); }
 };
 
 void TestTracking()
@@ -415,7 +415,7 @@ void TestTracking()
     HWINEVENTHOOK saved_hook = nullptr;
     {
         DesktopManager manager;
-        manager.ToggleDesktop({L"\\\\.\\DISPLAY1"});
+        manager.ToggleDesktop({{L"\\\\.\\DISPLAY1"}});
         Check(commands.empty(), "no operation before tracking is initialized");
         fail_tracking = true;
         Check(!manager.StartTracking() && GetLastError() == ERROR_ACCESS_DENIED,
@@ -432,7 +432,7 @@ void TestTracking()
         Check(!second.StartTracking() && GetLastError() == ERROR_ALREADY_EXISTS, "reject another active tracker");
         current_thread = 43;
         Check(!manager.StartTracking() && GetLastError() == ERROR_INVALID_THREAD_ID, "enforce tracking thread");
-        manager.ToggleDesktop({L"\\\\.\\DISPLAY1"});
+        manager.ToggleDesktop({{L"\\\\.\\DISPLAY1"}});
         Check(commands.empty(), "wrong-thread toggle performs no operation");
         current_thread = 42;
         saved_callback = window_event_proc;
@@ -489,25 +489,25 @@ void TestDesktop()
     {
         DesktopFixture fixture;
         const HWND notepad = AddWindow(MonitorAt(1));
-        fixture.manager.ToggleDesktop(fixture.secondary);
+        fixture.manager.ToggleDesktop({fixture.secondary});
         commands.clear();
         fixture.Toggle();
         Check(commands.empty() && GetWindow(notepad).minimized, "foreign candidate is neither promoted nor restored");
-        fixture.manager.ToggleDesktop({L"\\\\.\\DISPLAY2"});
+        fixture.manager.ToggleDesktop({{L"\\\\.\\DISPLAY2"}});
         Check(commands.size() == 1 && !GetWindow(notepad).minimized, "return to original device preserves candidate");
     }
     {
         DesktopFixture fixture;
         const HWND notepad = AddWindow(MonitorAt(1));
-        fixture.manager.ToggleDesktop(fixture.secondary);
+        fixture.manager.ToggleDesktop({fixture.secondary});
         const HWND blocker = AddWindow(MonitorAt(1));
         GetWindow(blocker).ignore_minimize = true;
-        fixture.manager.ToggleDesktop(fixture.secondary); // Notepad is now the restore batch.
+        fixture.manager.ToggleDesktop({fixture.secondary}); // Notepad is now the restore batch.
         commands.clear();
         fixture.Toggle();
         Check(commands.empty() && GetWindow(notepad).minimized, "foreign restore batch is not traversed or cleared");
         GetWindow(blocker).alive = false;
-        fixture.manager.ToggleDesktop(fixture.secondary);
+        fixture.manager.ToggleDesktop({fixture.secondary});
         Check(commands.size() == 1 && commands[0].first == notepad, "foreign candidate and restore survive target switch");
     }
     for (bool accepted_without_effect : {false, true}) {
@@ -713,9 +713,88 @@ void TestDesktop()
     {
         DesktopFixture fixture;
         fixture.manager.ToggleDesktop({});
-        fixture.manager.ToggleDesktop({L"\\\\.\\DISPLAY99"});
+        fixture.manager.ToggleDesktop({{L"\\\\.\\DISPLAY99"}});
         fixture.Toggle();
         Check(commands.empty(), "empty target, unknown target and empty desktop are no-ops");
+    }
+    {
+        DesktopFixture fixture;
+        const HMONITOR third = AddMonitor(L"\\\\.\\DISPLAY3", {2560, 0, 4480, 1080});
+        const HWND first = AddWindow(), second = AddWindow(MonitorAt(1)), foreign = AddWindow(third);
+        const HWND manual = AddWindow(MonitorAt(1));
+        GetWindow(manual).minimized = true;
+        const std::vector<MonitorTarget> targets{fixture.primary, fixture.secondary, {L"\\\\.\\display1"}};
+        fixture.manager.ToggleDesktop(targets);
+        Check(GetWindow(first).minimized && GetWindow(second).minimized && !GetWindow(foreign).minimized
+            && commands.size() == 2 && enum_calls == 1, "grouped targets minimize once without touching unselected screens");
+        commands.clear();
+        fixture.manager.ToggleDesktop(targets);
+        Check(commands.size() == 2 && commands[0].first == second && commands[1].first == first
+            && GetWindow(manual).minimized, "clean target group restores the owned batch in reverse order");
+    }
+    for (bool dirty_secondary : {false, true}) {
+        DesktopFixture fixture;
+        const HWND first = AddWindow();
+        fixture.Toggle();
+        const HWND second = dirty_secondary ? AddWindow(MonitorAt(1)) : nullptr;
+        const std::vector<MonitorTarget> expanded{fixture.primary, fixture.secondary};
+        commands.clear();
+        fixture.manager.ToggleDesktop(expanded);
+        if (!dirty_secondary) {
+            Check(commands.size() == 1 && commands[0].first == first && !GetWindow(first).minimized,
+                "adding a clean screen restores the previous screen's batch");
+        }
+        else {
+            Check(commands.size() == 1 && commands[0].first == second && GetWindow(first).minimized,
+                "adding a dirty screen minimizes without restoring the other screen");
+            commands.clear();
+            fixture.manager.ToggleDesktop(expanded);
+            Check(commands.size() == 1 && commands[0].first == second && GetWindow(first).minimized,
+                "new valid group batch replaces all records from the previous screen");
+        }
+    }
+    {
+        DesktopFixture fixture;
+        const HWND first = AddWindow(), second = AddWindow(MonitorAt(1));
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        fixture.manager.DiscardUnselectedRecords({fixture.secondary});
+        commands.clear();
+        fixture.manager.ToggleDesktop({fixture.secondary});
+        Check(commands.size() == 1 && commands[0].first == second && GetWindow(first).minimized,
+            "saving target removal revokes only removed screen records");
+        GetWindow(second).minimized = true;
+        RestoreEvent(second);
+        commands.clear();
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        Check(commands.empty(), "reselecting a removed screen does not reacquire discarded records");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND first = AddWindow();
+        fixture.Toggle();
+        const HWND blocker = AddWindow(MonitorAt(1));
+        GetWindow(blocker).ignore_minimize = true;
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        GetWindow(blocker).alive = false;
+        commands.clear();
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        Check(commands.size() == 1 && commands[0].first == first,
+            "an ineffective new request on another screen does not erase a useful group batch");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND first = AddWindow(), second = AddWindow(MonitorAt(1));
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        monitors[1].alive = false;
+        commands.clear();
+        fixture.manager.ToggleDesktop({fixture.primary, fixture.secondary});
+        Check(commands.size() == 1 && commands[0].first == first && GetWindow(second).minimized,
+            "offline targets do not block restoration on online screens");
+        monitors[1].alive = true;
+        commands.clear();
+        fixture.manager.ToggleDesktop({fixture.secondary});
+        Check(commands.size() == 1 && commands[0].first == second, "offline restore records remain usable after reconnection");
     }
     Check(window_event_hook == nullptr && tracking_uninstalls == tracking_installs - 2,
         "all successful tracking hooks are released; two failed starts own no hook");
@@ -774,6 +853,18 @@ void TestKeyboard()
     Hold(VK_LWIN);
     Check(Key('D', WM_KEYDOWN) == PassedThrough && Key('D', WM_KEYUP) == PassedThrough
         && posted_messages == 3, "adding Win during a held D does not intercept a partial gesture");
+
+    hook.SetEnabled(false);
+    Check(Key('D', WM_KEYDOWN) == PassedThrough && Key('D', WM_KEYDOWN) == PassedThrough
+        && Key('D', WM_KEYUP) == PassedThrough && posted_messages == 3, "disabled interception passes Win+D through without notifications");
+    Check(Key('D', WM_KEYDOWN) == PassedThrough, "disabled gesture starts native");
+    hook.SetEnabled(true);
+    Check(Key('D', WM_KEYDOWN) == PassedThrough && Key('D', WM_KEYUP) == PassedThrough,
+        "enabling during a native gesture does not intercept a partial press");
+    Check(Key('D', WM_KEYDOWN) == 1, "re-enabled interception handles the next complete gesture");
+    hook.SetEnabled(false);
+    Check(Key('D', WM_KEYDOWN) == 1 && Key('D', WM_KEYUP) == 1, "disabling during an intercepted gesture still consumes its repeat and release");
+    hook.SetEnabled(true);
 
     hook.Uninstall();
     hook.Uninstall();

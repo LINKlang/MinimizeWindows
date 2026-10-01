@@ -24,6 +24,9 @@ int tracking_installs = 0, tracking_removals = 0;
 int menu_calls = 0;
 POINT cursor_position{50, 50}, menu_position{};
 bool fail_cursor = false;
+bool fail_save = false;
+int saves = 0;
+std::vector<std::wstring> saved_devices;
 NOTIFYICONDATAW notification{};
 enum class MenuAction { Cancel, CoreThenCancel, Exit };
 MenuAction menu_action = MenuAction::Cancel;
@@ -116,6 +119,9 @@ void Reset()
     fail_cursor = false;
     notification = {};
     menu_action = MenuAction::Cancel;
+    fail_save = false;
+    saves = 0;
+    saved_devices.clear();
 }
 
 HWND Settings() { return FindWindowW(L"MinimizeWindows.Settings", nullptr); }
@@ -131,6 +137,15 @@ void LegacyTrayEvent(UINT event, UINT icon = 1)
 }
 
 } // namespace tray_test
+
+bool ConfigStore::Save(const AppConfig& config, std::wstring& error) const
+{
+    ++tray_test::saves;
+    if (tray_test::fail_save) { error = L"Test configuration is locked."; return false; }
+    tray_test::saved_devices = config.monitor_devices;
+    error.clear();
+    return true;
+}
 
 #define SetWinEventHook tray_test::Track
 #define UnhookWinEvent tray_test::Untrack
@@ -169,14 +184,15 @@ int main()
     primary.cbSize = sizeof(primary);
     Check(GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &primary) != FALSE,
         "resolve primary target for native UI tests");
-    const MonitorTarget target{primary.szDevice};
+    const AppConfig config{{primary.szDevice}};
+    const ConfigStore store(L"unused-isolated-config.json");
     WTL::CMessageLoop loop;
     Check(_Module.AddMessageLoop(&loop) != FALSE, "register WTL message loop");
 
     Reset();
     {
         Stage("Tray lifecycle: initialize/open/close");
-        TrayApplication app(target, loop);
+        TrayApplication app(store, config, loop);
         Check(app.Initialize(), "initialize tray and core");
         Check(Settings() == nullptr && adds == 1 && versions == 1, "startup does not create a settings frame");
         TrayEvent(WM_LBUTTONDBLCLK, 99);
@@ -270,6 +286,60 @@ int main()
     }
     Check(tracking_removals == 1, "application destruction releases restore tracking");
 
+    Reset();
+    {
+        TrayApplication app(store, config, loop);
+        Check(app.Initialize(), "initialize for configuration save integration");
+        saved_devices = config.monitor_devices;
+        core_window = CreateWindowExW(0, L"STATIC", L"Configuration core fixture", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            primary.rcWork.left + 40, primary.rcWork.top + 40, 300, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        Check(core_window != nullptr, "create save integration window");
+        const auto page = [&] { return GetDlgItem(Settings(), SettingsWindow::DisplayId); };
+        const auto click_button = [&](UINT id) {
+            SendMessageW(page(), WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(page(), id)));
+        };
+        TrayEvent(WM_LBUTTONDBLCLK);
+        click_button(DisplayPage::ConfigureId);
+        SendMessageW(GetDlgItem(page(), DisplayPage::ListId), WM_KEYDOWN, VK_HOME, 0);
+        SendMessageW(GetDlgItem(page(), DisplayPage::ListId), WM_KEYDOWN, VK_SPACE, 0);
+        fail_save = true;
+        click_button(DisplayPage::SaveId);
+        Check(saves == 1 && saved_devices == config.monitor_devices
+            && IsWindowEnabled(GetDlgItem(page(), DisplayPage::SaveId)), "failed save retains old configuration and edit mode");
+        SendMessageW(Settings(), WM_CLOSE, 0, 0);
+        SendMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
+        Pump();
+        Check(IsIconic(core_window), "failed save leaves the previous runtime target active");
+        SendMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
+        Pump();
+        Check(!IsIconic(core_window), "restore after save failure remains available");
+        fail_save = false;
+        TrayEvent(WM_LBUTTONDBLCLK);
+        click_button(DisplayPage::ConfigureId);
+        SendMessageW(GetDlgItem(page(), DisplayPage::ListId), WM_KEYDOWN, VK_HOME, 0);
+        SendMessageW(GetDlgItem(page(), DisplayPage::ListId), WM_KEYDOWN, VK_SPACE, 0);
+        click_button(DisplayPage::SaveId);
+        Check(saved_devices.empty() && !IsWindowEnabled(GetDlgItem(page(), DisplayPage::SaveId)),
+            "empty selection is saved and leaves edit mode");
+        SendMessageW(Settings(), WM_CLOSE, 0, 0);
+        SendMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
+        Pump();
+        Check(!IsIconic(core_window), "saved empty selection immediately stops core window operations");
+        TrayEvent(WM_LBUTTONDBLCLK);
+        click_button(DisplayPage::ConfigureId);
+        SendMessageW(GetDlgItem(page(), DisplayPage::ListId), WM_KEYDOWN, VK_HOME, 0);
+        SendMessageW(GetDlgItem(page(), DisplayPage::ListId), WM_KEYDOWN, VK_SPACE, 0);
+        click_button(DisplayPage::SaveId);
+        Check(saved_devices == config.monitor_devices, "saved targets can be re-enabled without restarting");
+        SendMessageW(Settings(), WM_CLOSE, 0, 0);
+        SendMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
+        Pump();
+        Check(IsIconic(core_window), "re-enabled configuration immediately updates the running core");
+        DestroyWindow(core_window);
+        app.Shutdown();
+    }
+    Pump();
+
     for (int failure = 0; failure < 4; ++failure) {
         Stage("Tray lifecycle: startup failure cleanup");
         Reset();
@@ -278,7 +348,7 @@ int main()
         fail_tracking = failure == 2;
         fail_keyboard = failure == 3;
         {
-            TrayApplication app(target, loop);
+            TrayApplication app(store, config, loop);
             Check(!app.Initialize(), "injected tray or core startup failure is reported");
         }
         Check(!IsWindow(notification.hWnd) && Settings() == nullptr, "startup failure destroys UI windows");
@@ -292,7 +362,7 @@ int main()
         Reset();
         {
             Stage("Tray lifecycle: Exit menu loop");
-            TrayApplication app(target, loop);
+            TrayApplication app(store, config, loop);
             Check(app.Initialize(), "initialize for tray Exit test");
             TrayEvent(WM_LBUTTONDBLCLK);
             menu_action = MenuAction::Exit;
@@ -308,7 +378,7 @@ int main()
     Reset();
     {
         Stage("Tray lifecycle: external quit loop");
-        TrayApplication app(target, loop);
+        TrayApplication app(store, config, loop);
         Check(app.Initialize(), "initialize for external WM_QUIT test");
         TrayEvent(WM_LBUTTONDBLCLK);
         PostQuitMessage(0);

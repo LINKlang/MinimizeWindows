@@ -16,14 +16,14 @@ namespace {
 
 const wchar_t* const UsageText =
     L"Usage:\n"
-    L"  MinimizeWindows.exe                        Use the configured monitor (default: primary)\n"
+    L"  MinimizeWindows.exe                        Use the configured monitors (default: primary)\n"
     L"  MinimizeWindows.exe --monitor \"\\\\.\\DISPLAY2\"  Use the specified GDI device\n"
     L"  MinimizeWindows.exe --list-monitors        List active displays and exit\n"
     L"  MinimizeWindows.exe --help                 Show this help and exit\n"
     L"\nChoose a GDI device name from --list-monitors, not a display number.\n"
     L"Configuration: %APPDATA%\\MinimizeWindows\\config.json\n"
-    L"--monitor selects and saves the target for future runs.\n"
-    L"The selected device stays fixed until the program exits.\n";
+    L"--monitor selects and saves a single target for future runs.\n"
+    L"Use Display > Configure to select multiple monitors or pause Win+D interception.\n";
 
 struct CommandLineOptions {
     enum class Mode { Run, ListMonitors, Help };
@@ -344,27 +344,41 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
     std::wstring config_path;
     if (!ConfigStore::UserFilePath(config_path, error)) { return ReportStartupError(error); }
     const ConfigStore store(config_path);
+    MonitorSnapshot snapshot;
+    if (!MonitorEnumerator{}.Enumerate(snapshot)) {
+        return ReportStartupError(FormatError(L"Monitor enumeration", GetLastError()));
+    }
+    MonitorTarget explicit_target;
+    if (!options.monitor_device.empty()
+        && !SelectMonitorTarget(snapshot, options.monitor_device, explicit_target, error)) {
+        return ReportStartupError(error);
+    }
+    MonitorTarget primary;
+    if (!SelectMonitorTarget(snapshot, L"", primary, error)) { return ReportStartupError(error); }
+    const AppConfig defaults{{primary.device_name}};
     AppConfig config;
-    if (!store.LoadOrCreate(config, error)) { return ReportStartupError(error); }
+    if (!store.LoadOrCreate(config, defaults, error)) { return ReportStartupError(error); }
 
-    MonitorTarget target;
-    {
-        MonitorSnapshot snapshot;
-        if (!MonitorEnumerator{}.Enumerate(snapshot)) {
-            return ReportStartupError(FormatError(L"Monitor enumeration", GetLastError()));
-        }
-        const std::wstring& requested = options.monitor_device.empty() ? config.monitor_device : options.monitor_device;
-        if (!SelectMonitorTarget(snapshot, requested, target, error)) {
-            return ReportStartupError(error);
+    AppConfig selected = config;
+    if (!options.monitor_device.empty()) {
+        selected.monitor_devices = {explicit_target.device_name};
+    }
+    else {
+        // Keep offline targets; canonicalize only devices in the current snapshot.
+        for (auto& device : selected.monitor_devices) {
+            for (const auto& monitor : snapshot.monitors) {
+                if (_wcsicmp(device.c_str(), monitor.device_name.c_str()) == 0) {
+                    device = monitor.device_name;
+                    break;
+                }
+            }
         }
     }
-
-    if (config.monitor_device != target.device_name) {
-        config.monitor_device = target.device_name;
-        if (!store.Save(config, error)) { return ReportStartupError(error); }
+    if (selected.monitor_devices != config.monitor_devices) {
+        if (!store.Save(selected, error)) { return ReportStartupError(error); }
     }
 
-    const int result = RunTrayApplication(instance, target);
+    const int result = RunTrayApplication(instance, store, selected);
     if (result != 0) { return ReportStartupError(FormatError(L"Tray application startup", GetLastError())); }
     return result;
 }

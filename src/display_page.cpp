@@ -119,14 +119,112 @@ DisplayPage::~DisplayPage()
     if (label_font_ != nullptr) { DeleteObject(label_font_); }
 }
 
-bool DisplayPage::CreatePage(HWND parent, const RECT& bounds, const MonitorTarget& target)
+bool DisplayPage::CreatePage(HWND parent, const RECT& bounds, const std::vector<std::wstring>& devices,
+    SaveMonitorSelection save)
 {
-    initial_target_ = target;
+    editing_ = false;
+    draft_devices_.clear();
+    save_error_.clear();
+    unavailable_selection_.clear();
+    save_ = std::move(save);
+    SetConfiguration(devices);
     model_ = DisplayModel{};
     list_scroll_ = information_scroll_ = 0;
     RECT rectangle = bounds;
     return Create(parent, &rectangle, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
         WS_EX_CONTROLPARENT) != nullptr;
+}
+
+void DisplayPage::SetConfiguration(const std::vector<std::wstring>& devices)
+{
+    configured_devices_ = devices;
+    initial_target_.device_name = devices.empty() ? L"" : devices.front();
+    if (IsWindow()) { RebuildEntries(); UpdateButtons(); Layout(); }
+}
+
+bool DisplayPage::IsTargetDevice(const std::wstring& device) const
+{
+    const auto& devices = editing_ ? draft_devices_ : configured_devices_;
+    return std::any_of(devices.begin(), devices.end(), [&](const std::wstring& current) {
+        return _wcsicmp(current.c_str(), device.c_str()) == 0;
+    });
+}
+
+void DisplayPage::RebuildEntries()
+{
+    entries_.clear();
+    const auto& monitors = model_.Snapshot().monitors;
+    for (size_t i = 0; i < monitors.size(); ++i) { entries_.push_back({i, monitors[i].device_name}); }
+    const auto add_unavailable = [&](const std::vector<std::wstring>& devices) {
+        for (const auto& device : devices) {
+            if (std::none_of(entries_.begin(), entries_.end(), [&](const ListEntry& entry) {
+                    return _wcsicmp(entry.device_name.c_str(), device.c_str()) == 0;
+                })) { entries_.push_back({DisplayModel::NoSelection, device}); }
+        }
+    };
+    add_unavailable(configured_devices_);
+    if (editing_) { add_unavailable(draft_devices_); }
+    if (!unavailable_selection_.empty()) {
+        const auto found = std::find_if(entries_.begin(), entries_.end(), [&](const ListEntry& entry) {
+            return _wcsicmp(entry.device_name.c_str(), unavailable_selection_.c_str()) == 0;
+        });
+        if (found == entries_.end()) { unavailable_selection_.clear(); }
+        else if (found->output != DisplayModel::NoSelection) {
+            model_.Select(found->output);
+            unavailable_selection_.clear();
+        }
+    }
+}
+
+size_t DisplayPage::InspectedEntry() const
+{
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        if (unavailable_selection_.empty() ? entries_[i].output == model_.Selection()
+            && entries_[i].output != DisplayModel::NoSelection
+            : _wcsicmp(entries_[i].device_name.c_str(), unavailable_selection_.c_str()) == 0) { return i; }
+    }
+    return DisplayModel::NoSelection;
+}
+
+std::wstring DisplayPage::InspectedDevice() const
+{
+    if (!unavailable_selection_.empty()) { return unavailable_selection_; }
+    const auto selected = model_.Selected();
+    return selected != nullptr ? selected->device_name : std::wstring{};
+}
+
+void DisplayPage::SelectEntry(size_t index)
+{
+    if (index >= entries_.size()) { return; }
+    if (entries_[index].output != DisplayModel::NoSelection) { Select(entries_[index].output); return; }
+    unavailable_selection_ = entries_[index].device_name;
+    information_scroll_ = 0;
+    UpdateInformation();
+    EnsureSelectionVisible();
+    InvalidateSurfaces();
+}
+
+void DisplayPage::ToggleTarget(const std::wstring& device)
+{
+    if (!editing_ || device.empty()) { return; }
+    const auto found = std::find_if(draft_devices_.begin(), draft_devices_.end(), [&](const std::wstring& current) {
+        return _wcsicmp(current.c_str(), device.c_str()) == 0;
+    });
+    if (found == draft_devices_.end()) { draft_devices_.push_back(device); }
+    else { draft_devices_.erase(found); }
+    save_error_.clear();
+    UpdateInformation();
+    Invalidate(FALSE);
+    InvalidateSurfaces();
+}
+
+void DisplayPage::UpdateButtons()
+{
+    if (configure_ != nullptr) { ::SetWindowTextW(configure_, editing_ ? L"Cancel" : L"Configure"); }
+    if (save_button_ != nullptr) { ::EnableWindow(save_button_, editing_ && static_cast<bool>(save_)); }
+    if (refresh_ != nullptr) { ::InvalidateRect(refresh_, nullptr, FALSE); }
+    if (configure_ != nullptr) { ::InvalidateRect(configure_, nullptr, FALSE); }
+    if (save_button_ != nullptr) { ::InvalidateRect(save_button_, nullptr, FALSE); }
 }
 
 void DisplayPage::UpdateFonts()
@@ -152,6 +250,7 @@ void DisplayPage::Refresh()
         MonitorSnapshot snapshot;
         if (MonitorEnumerator().Enumerate(snapshot)) { model_.Update(std::move(snapshot), initial_target_); }
         else { model_.Fail(GetLastError()); }
+        RebuildEntries();
         information_scroll_ = 0;
         Layout();
         EnsureSelectionVisible();
@@ -159,6 +258,7 @@ void DisplayPage::Refresh()
     catch (const std::bad_alloc&) {
         model_.Fail(ERROR_NOT_ENOUGH_MEMORY);
         tiles_.clear();
+        entries_.clear();
         rows_.clear();
         list_scroll_ = information_scroll_ = information_height_ = 0;
     }
@@ -176,7 +276,12 @@ LRESULT DisplayPage::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
         || information_.Create(m_hWnd, &empty, nullptr, style, 0, InformationId) == nullptr) { return -1; }
     refresh_ = CreateWindowExW(0, L"BUTTON", L"Refresh", style | BS_OWNERDRAW, 0, 0, 0, 0,
         m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(RefreshId)), _Module.GetModuleInstance(), nullptr);
-    if (refresh_ == nullptr) { return -1; }
+    configure_ = CreateWindowExW(0, L"BUTTON", L"Configure", style | BS_OWNERDRAW, 0, 0, 0, 0,
+        m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ConfigureId)), _Module.GetModuleInstance(), nullptr);
+    save_button_ = CreateWindowExW(0, L"BUTTON", L"Save", style | BS_OWNERDRAW, 0, 0, 0, 0,
+        m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(SaveId)), _Module.GetModuleInstance(), nullptr);
+    if (refresh_ == nullptr || configure_ == nullptr || save_button_ == nullptr) { return -1; }
+    UpdateButtons();
     Layout();
     return 0;
 }
@@ -199,6 +304,10 @@ void DisplayPage::Layout()
         (std::max<int>)(1, width - list_width - gap), bottom_height, SWP_NOZORDER | SWP_NOACTIVATE);
     ::SetWindowPos(refresh_, nullptr, client.right - margin - Px(80), Px(16), Px(80), Px(34),
         SWP_NOZORDER | SWP_NOACTIVATE);
+    ::SetWindowPos(save_button_, nullptr, client.right - margin - Px(160), Px(16), Px(72), Px(34),
+        SWP_NOZORDER | SWP_NOACTIVATE);
+    ::SetWindowPos(configure_, nullptr, client.right - margin - Px(268), Px(16), Px(100), Px(34),
+        SWP_NOZORDER | SWP_NOACTIVATE);
     tiles_ = model_.Layout(Client(topology_), Px(24));
     UpdateInformation();
     list_scroll_ = (std::min)(list_scroll_, ScrollLimit(DisplayPane::List));
@@ -211,13 +320,22 @@ void DisplayPage::UpdateInformation()
 {
     rows_.clear();
     information_height_ = 0;
-    const auto selected = model_.Selected();
-    if (selected == nullptr || !information_.IsWindow()) { return; }
+    const auto selected = SelectedMonitor();
+    if (!information_.IsWindow()) { return; }
+    std::vector<std::pair<std::wstring, std::wstring>> fields;
+    if (!save_error_.empty()) { fields.push_back({L"Save error", save_error_}); }
+    if (!unavailable_selection_.empty()) {
+        fields.push_back({L"Device name", unavailable_selection_});
+        fields.push_back({L"Connection", L"Unavailable"});
+    }
+    else if (selected != nullptr) { fields = DisplayInformation(*selected); }
+    // Keep a save failure visible even when a monitor is being inspected.
+    if (selected != nullptr && !save_error_.empty()) { fields.insert(fields.begin(), {L"Save error", save_error_}); }
     const HDC dc = information_.GetDC();
     if (dc == nullptr) { return; }
     const HGDIOBJ previous = SelectObject(dc, body_font_ != nullptr ? body_font_ : GetStockObject(DEFAULT_GUI_FONT));
     const int value_width = (std::max<int>)(Px(60), Client(information_).right - Px(160));
-    for (const auto& field : DisplayInformation(*selected)) {
+    for (const auto& field : fields) {
         const std::wstring value = WrapValue(dc, field.second, value_width);
         RECT measured{0, 0, value_width, 0};
         DrawTextW(dc, value.c_str(), -1, &measured, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
@@ -232,6 +350,7 @@ void DisplayPage::UpdateInformation()
 void DisplayPage::Select(size_t index)
 {
     if (!model_.Select(index)) { return; }
+    unavailable_selection_.clear();
     information_scroll_ = 0;
     UpdateInformation();
     EnsureSelectionVisible();
@@ -240,9 +359,10 @@ void DisplayPage::Select(size_t index)
 
 void DisplayPage::EnsureSelectionVisible()
 {
-    if (model_.Selection() == DisplayModel::NoSelection) { list_scroll_ = 0; return; }
+    const size_t inspected = InspectedEntry();
+    if (inspected == DisplayModel::NoSelection) { list_scroll_ = 0; return; }
     const int height = (std::max<int>)(1, Client(list_).bottom - Px(48));
-    const int row = static_cast<int>(model_.Selection()) * Px(62);
+    const int row = static_cast<int>(inspected) * Px(62);
     if (row < list_scroll_) { list_scroll_ = row; }
     if (row + Px(62) > list_scroll_ + height) { list_scroll_ = row + Px(62) - height; }
     list_scroll_ = (std::max<int>)(0, (std::min)(list_scroll_, ScrollLimit(DisplayPane::List)));
@@ -251,7 +371,7 @@ void DisplayPage::EnsureSelectionVisible()
 int DisplayPage::ScrollLimit(DisplayPane pane) const
 {
     if (pane == DisplayPane::List) {
-        return (std::max<int>)(0, static_cast<int>(model_.Snapshot().monitors.size()) * Px(62)
+        return (std::max<int>)(0, static_cast<int>(entries_.size()) * Px(62)
             - (Client(list_).bottom - Px(48)));
     }
     if (pane == DisplayPane::Information) {
@@ -273,9 +393,11 @@ void DisplayPage::Click(DisplayPane pane, POINT point)
     if (pane == DisplayPane::Topology) {
         for (auto it = tiles_.rbegin(); it != tiles_.rend(); ++it) {
             if (!PtInRect(&it->bounds, point)) { continue; }
-            if (std::find(it->outputs.begin(), it->outputs.end(), model_.Selection()) == it->outputs.end()) {
+            if (!unavailable_selection_.empty()
+                || std::find(it->outputs.begin(), it->outputs.end(), model_.Selection()) == it->outputs.end()) {
                 Select(it->outputs.front());
             }
+            ToggleTarget(InspectedDevice());
             return;
         }
     }
@@ -291,7 +413,8 @@ void DisplayPage::Click(DisplayPane pane, POINT point)
             ::InvalidateRect(window, nullptr, FALSE);
         }
         else if (pane == DisplayPane::List && point.y >= header) {
-            Select(static_cast<size_t>((point.y - header + list_scroll_) / Px(62)));
+            const size_t index = static_cast<size_t>((point.y - header + list_scroll_) / Px(62));
+            if (index < entries_.size()) { SelectEntry(index); ToggleTarget(InspectedDevice()); }
         }
     }
 }
@@ -307,16 +430,20 @@ void DisplayPage::Key(DisplayPane pane, UINT key)
         else if (key == VK_END) { Scroll(pane, ScrollLimit(pane)); }
         return;
     }
-    const size_t count = model_.Snapshot().monitors.size();
+    if (key == VK_SPACE && editing_) { ToggleTarget(InspectedDevice()); return; }
+    const bool list = pane == DisplayPane::List;
+    const size_t count = list ? entries_.size() : model_.Snapshot().monitors.size();
     if (count == 0) { return; }
-    const size_t current = model_.Selection() < count ? model_.Selection() : 0;
-    if (key == VK_LEFT || key == VK_UP) { Select(current > 0 ? current - 1 : count - 1); }
-    else if (key == VK_RIGHT || key == VK_DOWN) { Select((current + 1) % count); }
-    else if (key == VK_HOME) { Select(0); }
-    else if (key == VK_END) { Select(count - 1); }
+    const size_t inspected = list ? InspectedEntry() : model_.Selection();
+    const size_t current = inspected < count ? inspected : 0;
+    const auto choose = [&](size_t index) { if (list) { SelectEntry(index); } else { Select(index); } };
+    if (key == VK_LEFT || key == VK_UP) { choose(current > 0 ? current - 1 : count - 1); }
+    else if (key == VK_RIGHT || key == VK_DOWN) { choose((current + 1) % count); }
+    else if (key == VK_HOME) { choose(0); }
+    else if (key == VK_END) { choose(count - 1); }
     else if (pane == DisplayPane::List && (key == VK_PRIOR || key == VK_NEXT)) {
         const size_t step = static_cast<size_t>((std::max<int>)(1, (Client(list_).bottom - Px(48)) / Px(62)));
-        Select(key == VK_PRIOR ? (current > step ? current - step : 0) : (std::min)(count - 1, current + step));
+        choose(key == VK_PRIOR ? (current > step ? current - step : 0) : (std::min)(count - 1, current + step));
     }
 }
 
@@ -324,11 +451,17 @@ void DisplayPage::PaintPage(HDC dc)
 {
     const RECT client = Client(m_hWnd);
     Fill(dc, client, Background);
-    Text(dc, L"Monitors", {Px(20), Px(12), client.right - Px(130), Px(38)}, title_font_, TextColor);
+    Text(dc, L"Monitors", {Px(20), Px(12), client.right - Px(300), Px(38)}, title_font_, TextColor);
     const size_t count = model_.Snapshot().monitors.size();
-    Text(dc, std::to_wstring(count) + (count == 1 ? L" monitor · Read only" : L" monitors · Read only"),
-        {Px(20), Px(38), client.right - Px(130), Px(60)}, body_font_, Muted);
-    Text(dc, L"Select a monitor in the diagram or list to view its details",
+    const auto& devices = editing_ ? draft_devices_ : configured_devices_;
+    Text(dc, std::to_wstring(count) + (count == 1 ? L" monitor · " : L" monitors · ")
+        + (editing_ ? L"Editing · " : L"") + std::to_wstring(devices.size()) + L" Win+D targets",
+        {Px(20), Px(38), client.right - Px(20), Px(60)}, body_font_, Muted);
+    const std::wstring instruction = !save_error_.empty() ? L"Save failed. Configuration is unchanged; see the error below."
+        : editing_ ? L"Click monitors to toggle Win+D. Save to apply changes."
+        : devices.empty() ? L"Win+D interception is paused. Configure monitors to enable it."
+        : L"Blue monitors participate in Win+D. Select a monitor to view its details.";
+    Text(dc, instruction,
         {Px(20), graph_bounds_.bottom + Px(7), client.right - Px(20), graph_bounds_.bottom + Px(30)},
         body_font_, Muted);
 }
@@ -363,13 +496,27 @@ void DisplayPage::PaintSurface(DisplayPane pane, HDC dc, const RECT& client, boo
             Text(dc, status, text, body_font_, Muted, DT_CENTER | DT_WORDBREAK);
         }
         for (const auto& tile : tiles_) {
-            const bool selected = std::find(tile.outputs.begin(), tile.outputs.end(), model_.Selection()) != tile.outputs.end();
-            SetDCBrushColor(dc, selected ? Accent : Tile);
+            const bool inspected = unavailable_selection_.empty()
+                && std::find(tile.outputs.begin(), tile.outputs.end(), model_.Selection()) != tile.outputs.end();
+            const bool enabled = std::any_of(tile.outputs.begin(), tile.outputs.end(), [&](size_t index) {
+                return IsTargetDevice(model_.Snapshot().monitors[index].device_name);
+            });
+            SetDCBrushColor(dc, enabled ? Accent : Tile);
             const HGDIOBJ brush = SelectObject(dc, GetStockObject(DC_BRUSH));
             const HGDIOBJ pen = SelectObject(dc, GetStockObject(NULL_PEN));
             RoundRect(dc, tile.bounds.left, tile.bounds.top, tile.bounds.right, tile.bounds.bottom, Px(12), Px(12));
             SelectObject(dc, pen);
             SelectObject(dc, brush);
+            if (inspected) {
+                const HPEN outline = CreatePen(PS_SOLID, (std::max)(1, Px(2)), TextColor);
+                const HGDIOBJ old_pen = SelectObject(dc, outline);
+                const HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+                RoundRect(dc, tile.bounds.left + 1, tile.bounds.top + 1, tile.bounds.right - 1,
+                    tile.bounds.bottom - 1, Px(12), Px(12));
+                SelectObject(dc, old_brush);
+                SelectObject(dc, old_pen);
+                DeleteObject(outline);
+            }
             RECT text = tile.bounds;
             InflateRect(&text, -Px(5), 0);
             const int available_width = (std::max<int>)(1, text.right - text.left);
@@ -400,33 +547,46 @@ void DisplayPage::PaintSurface(DisplayPane pane, HDC dc, const RECT& client, boo
         const int saved = SaveDC(dc);
         IntersectClipRect(dc, 0, Px(48), client.right - Px(10), client.bottom);
         const auto& monitors = model_.Snapshot().monitors;
-        for (size_t i = 0; i < monitors.size(); ++i) {
+        for (size_t i = 0; i < entries_.size(); ++i) {
             const int y = Px(48) + static_cast<int>(i) * Px(62) - list_scroll_;
             if (y + Px(62) < Px(48) || y > client.bottom) { continue; }
-            const bool selected = i == model_.Selection();
+            const bool selected = i == InspectedEntry();
             if (selected) { Fill(dc, {Px(8), y, client.right - Px(12), y + Px(58)}, RGB(34, 49, 63)); }
             if (selected) { Fill(dc, {Px(8), y + Px(8), Px(11), y + Px(50)}, Accent); }
-            const auto& monitor = monitors[i];
-            std::wstring label = DisplayDeviceLabel(monitor.device_name);
+            const auto& entry = entries_[i];
+            const auto* monitor = entry.output < monitors.size() ? &monitors[entry.output] : nullptr;
+            std::wstring label = DisplayDeviceLabel(entry.device_name);
             size_t matching = 0, ordinal = 0;
             for (size_t j = 0; j < monitors.size(); ++j) {
-                if (_wcsicmp(monitors[j].device_name.c_str(), monitor.device_name.c_str()) == 0) {
+                if (_wcsicmp(monitors[j].device_name.c_str(), entry.device_name.c_str()) == 0) {
                     ++matching;
-                    if (j <= i) { ++ordinal; }
+                    if (j <= entry.output) { ++ordinal; }
                 }
             }
             if (matching > 1) { label += L" · Output " + std::to_wstring(ordinal); }
-            if (monitor.primary) { label += L" · Primary"; }
-            Text(dc, label, {Px(20), y + Px(6), client.right - Px(20), y + Px(29)}, body_font_, TextColor);
-            Text(dc, monitor.friendly_name.empty() ? monitor.device_name : monitor.friendly_name,
-                {Px(20), y + Px(29), client.right - Px(20), y + Px(52)}, body_font_, Muted);
+            if (monitor != nullptr && monitor->primary) { label += L" · Primary"; }
+            const bool enabled = IsTargetDevice(entry.device_name);
+            RECT check{Px(20), y + Px(19), Px(36), y + Px(35)};
+            Fill(dc, check, enabled ? Accent : Tile);
+            if (enabled) {
+                const HPEN check_pen = CreatePen(PS_SOLID, (std::max)(1, Px(2)), TextColor);
+                const HGDIOBJ old_pen = SelectObject(dc, check_pen);
+                const POINT points[]{{Px(23), y + Px(27)}, {Px(27), y + Px(31)}, {Px(33), y + Px(23)}};
+                Polyline(dc, points, ARRAYSIZE(points));
+                SelectObject(dc, old_pen);
+                DeleteObject(check_pen);
+            }
+            Text(dc, label, {Px(46), y + Px(6), client.right - Px(20), y + Px(29)}, body_font_, TextColor);
+            Text(dc, monitor == nullptr ? L"Unavailable"
+                : monitor->friendly_name.empty() ? monitor->device_name : monitor->friendly_name,
+                {Px(46), y + Px(29), client.right - Px(20), y + Px(52)}, body_font_, Muted);
         }
         RestoreDC(dc, saved);
         DrawScrollbar(dc, client, list_scroll_, ScrollLimit(pane));
     }
     else {
         Text(dc, L"Monitor information", {Px(16), Px(10), client.right - Px(16), Px(38)}, title_font_, TextColor);
-        if (model_.Selected() == nullptr) {
+        if (rows_.empty()) {
             Text(dc, L"Select a monitor", {Px(16), Px(52), client.right - Px(16), Px(84)}, body_font_, Muted);
         }
         const int saved = SaveDC(dc);
@@ -460,6 +620,61 @@ void DisplayPage::InvalidateSurfaces()
 LRESULT DisplayPage::OnSize(UINT, WPARAM, LPARAM, BOOL&) { Layout(); return 0; }
 LRESULT DisplayPage::OnRefresh(WORD, WORD, HWND, BOOL&) { Refresh(); return 0; }
 
+LRESULT DisplayPage::OnConfigure(WORD, WORD, HWND, BOOL&)
+{
+    try {
+        if (!editing_) { draft_devices_ = configured_devices_; editing_ = true; }
+        else { editing_ = false; draft_devices_.clear(); }
+        save_error_.clear();
+        RebuildEntries();
+        UpdateButtons();
+        Layout();
+    }
+    catch (const std::bad_alloc&) {
+        save_error_ = L"Not enough memory to edit monitor configuration.";
+        UpdateInformation();
+        Invalidate(FALSE);
+        InvalidateSurfaces();
+    }
+    return 0;
+}
+
+LRESULT DisplayPage::OnSave(WORD, WORD, HWND, BOOL&)
+{
+    if (!editing_ || !save_) { return 0; }
+    bool committed = false;
+    try {
+        auto next = draft_devices_;
+        MonitorTarget initial{next.empty() ? L"" : next.front()};
+        std::wstring error;
+        if (!save_(next, error)) {
+            save_error_ = error.empty() ? L"Unable to save configuration." : std::move(error);
+            information_scroll_ = 0;
+            UpdateInformation();
+            Invalidate(FALSE);
+            InvalidateSurfaces();
+            return 0;
+        }
+        committed = true;
+        configured_devices_ = std::move(next);
+        initial_target_ = std::move(initial);
+        editing_ = false;
+        draft_devices_.clear();
+        save_error_.clear();
+        ::SetFocus(configure_);
+        UpdateButtons();
+        RebuildEntries();
+        Layout();
+    }
+    catch (const std::bad_alloc&) {
+        save_error_ = committed ? L"Configuration saved; not enough memory to refresh the page."
+            : L"Not enough memory to save configuration.";
+        Invalidate(FALSE);
+        InvalidateSurfaces();
+    }
+    return 0;
+}
+
 LRESULT DisplayPage::OnPaint(UINT, WPARAM, LPARAM, BOOL&)
 {
     PAINTSTRUCT paint{};
@@ -474,9 +689,15 @@ LRESULT DisplayPage::OnPrint(UINT, WPARAM dc, LPARAM, BOOL&) { PaintPage(reinter
 LRESULT DisplayPage::OnDrawItem(UINT, WPARAM, LPARAM parameter, BOOL& handled)
 {
     const auto draw = reinterpret_cast<DRAWITEMSTRUCT*>(parameter);
-    if (draw->CtlID != RefreshId) { handled = FALSE; return 0; }
-    Fill(draw->hDC, draw->rcItem, (draw->itemState & ODS_SELECTED) ? Accent : Tile);
-    Text(draw->hDC, L"Refresh", draw->rcItem, body_font_, TextColor, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (draw->CtlID != RefreshId && draw->CtlID != ConfigureId && draw->CtlID != SaveId) {
+        handled = FALSE; return 0;
+    }
+    const bool disabled = (draw->itemState & ODS_DISABLED) != 0;
+    Fill(draw->hDC, draw->rcItem, !disabled && (draw->itemState & ODS_SELECTED) ? Accent : Tile);
+    const wchar_t* caption = draw->CtlID == RefreshId ? L"Refresh"
+        : draw->CtlID == SaveId ? L"Save" : editing_ ? L"Cancel" : L"Configure";
+    Text(draw->hDC, caption, draw->rcItem, body_font_, disabled ? Muted : TextColor,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     if (draw->itemState & ODS_FOCUS) {
         RECT focus = draw->rcItem;
         InflateRect(&focus, -Px(3), -Px(3));

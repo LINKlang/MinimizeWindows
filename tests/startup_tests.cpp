@@ -26,7 +26,8 @@ int tray_calls = 0;
 std::wstring selected_device;
 int enumeration_calls = 0;
 std::wstring command_line;
-std::wstring configured_device;
+std::vector<std::wstring> configured_devices, selected_devices;
+bool configuration_exists = false;
 bool fail_config = false;
 int configuration_calls = 0;
 bool fail_save = false;
@@ -41,11 +42,12 @@ public:
         error.clear();
         return true;
     }
-    bool LoadOrCreate(AppConfig& config, std::wstring& error) const
+    bool LoadOrCreate(AppConfig& config, const AppConfig& defaults, std::wstring& error) const
     {
         ++configuration_calls;
         if (fail_config) { error = L"Configuration file is invalid."; return false; }
-        config.monitor_device = configured_device;
+        if (!configuration_exists) { configured_devices = defaults.monitor_devices; configuration_exists = true; }
+        config.monitor_devices = configured_devices;
         error.clear();
         return true;
     }
@@ -53,16 +55,17 @@ public:
     {
         ++save_calls;
         if (fail_save) { error = L"Configuration file cannot be saved."; return false; }
-        configured_device = config.monitor_device;
+        configured_devices = config.monitor_devices;
         error.clear();
         return true;
     }
 };
 
-int RunTrayApplication(HINSTANCE, const MonitorTarget& target)
+int RunTrayApplication(HINSTANCE, const ConfigStore&, const AppConfig& config)
 {
     ++tray_calls;
-    selected_device = target.device_name;
+    selected_devices = config.monitor_devices;
+    selected_device = selected_devices.empty() ? L"" : selected_devices.front();
     if (fail_tray) { SetLastError(ERROR_ACCESS_DENIED); return 1; }
     return 0;
 }
@@ -137,17 +140,17 @@ int main()
     fail_tray = false;
     Check(RunEntry(L"", output) == 0 && tray_calls == 2 && selected_device == L"\\\\.\\DISPLAY1",
         "normal startup passes the default primary device to the tray application");
-    Check(configured_device == L"\\\\.\\DISPLAY1", "default startup persists the resolved primary device");
+    Check(configured_devices == std::vector<std::wstring>{L"\\\\.\\DISPLAY1"}, "default startup persists the resolved primary device");
     const int unchanged_saves = save_calls;
     Check(RunEntry(L" --monitor \\\\.\\display1", output) == 0 && tray_calls == 3
         && selected_device == L"\\\\.\\DISPLAY1", "explicit case-insensitive target is canonicalized before UI startup");
     Check(save_calls == unchanged_saves, "an unchanged target does not rewrite configuration");
-    configured_device = L"\\\\.\\display2";
+    configured_devices = {L"\\\\.\\display2"};
     Check(RunEntry(L"", output) == 0 && selected_device == L"\\\\.\\DISPLAY2",
         "saved device is canonicalized and used without a command-line override");
     Check(RunEntry(L" --monitor \\\\.\\DISPLAY1", output) == 0 && selected_device == L"\\\\.\\DISPLAY1"
-        && configured_device == L"\\\\.\\DISPLAY1", "command-line selection updates saved configuration");
-    Check(RunEntry(L" --monitor \\\\.\\display2", output) == 0 && configured_device == L"\\\\.\\DISPLAY2",
+        && configured_devices == std::vector<std::wstring>{L"\\\\.\\DISPLAY1"}, "command-line selection updates saved configuration");
+    Check(RunEntry(L" --monitor \\\\.\\display2", output) == 0 && configured_devices == std::vector<std::wstring>{L"\\\\.\\DISPLAY2"},
         "explicit secondary selection saves the canonical device name");
     Check(RunEntry(L"", output) == 0 && selected_device == L"\\\\.\\DISPLAY2",
         "subsequent default startup uses the previously saved secondary device");
@@ -165,23 +168,28 @@ int main()
     Check(save_calls == saved, "help, listing and invalid arguments do not save configuration");
     fail_save = true;
     Check(RunEntry(L" --monitor \\\\.\\DISPLAY1", output) == 1 && tray_calls == installed
-        && configured_device == L"\\\\.\\DISPLAY2" && output.find("cannot be saved") != std::string::npos,
+        && configured_devices == std::vector<std::wstring>{L"\\\\.\\DISPLAY2"} && output.find("cannot be saved") != std::string::npos,
         "save failure stops startup and preserves the saved target");
     fail_save = false;
     fail_config = true;
     const int before_config_failure = enumeration_calls;
-    Check(RunEntry(L"", output) == 1 && tray_calls == installed && enumeration_calls == before_config_failure
-        && output.find("Configuration") != std::string::npos, "configuration errors stop startup before enumeration or UI");
+    Check(RunEntry(L"", output) == 1 && tray_calls == installed && enumeration_calls == before_config_failure + 1
+        && output.find("Configuration") != std::string::npos, "configuration errors stop startup before UI");
     fail_config = false;
-    configured_device = L"\\\\.\\DISPLAY99";
+    configured_devices = {L"\\\\.\\DISPLAY99"};
     const int before_unavailable = save_calls;
-    Check(RunEntry(L"", output) == 1 && tray_calls == installed && save_calls == before_unavailable,
-        "unavailable saved target is neither replaced nor used for another device");
+    Check(RunEntry(L"", output) == 0 && tray_calls == installed + 1 && save_calls == before_unavailable
+        && selected_device == L"\\\\.\\DISPLAY99", "offline saved targets are retained and allow tray startup");
     Check(RunEntry(L" --monitor \\\\.\\DISPLAY99", output) == 1 && save_calls == before_unavailable,
         "unavailable command-line selection does not overwrite configuration");
-    configured_device.clear();
+    configured_devices = {L"\\\\.\\DISPLAY1", L"\\\\.\\DISPLAY2"};
+    Check(RunEntry(L"", output) == 0 && selected_devices == configured_devices, "startup retains multiple configured targets");
+    configured_devices.clear();
+    Check(RunEntry(L"", output) == 0 && selected_devices.empty(), "explicit empty selection reaches tray startup without primary fallback");
+    configuration_exists = false;
     no_monitor = true;
-    Check(RunEntry(L"", output) == 1 && tray_calls == installed,
+    const int before_no_monitor = tray_calls;
+    Check(RunEntry(L"", output) == 1 && tray_calls == before_no_monitor,
         "unavailable startup monitor exits before UI startup");
     std::puts("Entry point tray routing, startup error and CLI exit-mode tests passed.");
     return 0;

@@ -11,9 +11,9 @@ bool ConfigStore::UserFilePath(std::wstring& path, std::wstring& error)
     return true;
 }
 
-bool ConfigStore::LoadOrCreate(AppConfig& config, std::wstring& error) const
+bool ConfigStore::LoadOrCreate(AppConfig& config, const AppConfig& defaults, std::wstring& error) const
 {
-    config = {};
+    config = defaults;
     error.clear();
     return true;
 }

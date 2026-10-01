@@ -1,3 +1,4 @@
+param([string]$ApplicationOutputRoot = '')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -14,8 +15,15 @@ $jsonInclude = Join-Path $projectRoot 'third_party'
 Push-Location $projectRoot
 try {
     $msbuild = Join-Path $visualStudio 'MSBuild\Current\Bin\MSBuild.exe'
+    $releaseApplication = Join-Path $projectRoot 'Release\MinimizeWindows.exe'
     foreach ($configuration in @('Debug', 'Release')) {
-        & $msbuild (Join-Path $projectRoot 'MinimizeWindows.sln') -nologo -m "-p:Configuration=$configuration" -p:Platform=x86 -verbosity:minimal
+        $buildArguments = @((Join-Path $projectRoot 'MinimizeWindows.sln'), '-nologo', '-m', "-p:Configuration=$configuration", '-p:Platform=x86', '-verbosity:minimal')
+        if ($ApplicationOutputRoot) {
+            $outputDirectory = Join-Path ([System.IO.Path]::GetFullPath($ApplicationOutputRoot)) $configuration
+            $buildArguments += "-p:OutDir=$outputDirectory\"
+            if ($configuration -eq 'Release') { $releaseApplication = Join-Path $outputDirectory 'MinimizeWindows.exe' }
+        }
+        & $msbuild @buildArguments
         if ($LASTEXITCODE -ne 0) { throw "$configuration x86 build failed." }
     }
     $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /Fe:"' + $testOutput + '\behavior_tests.exe" /Fo:"' + $testOutput + '\behavior_tests.obj" tests\behavior_tests.cpp user32.lib dwmapi.lib'
@@ -103,7 +111,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Compiling native monitor tests failed.' }
     & (Join-Path $testOutput 'monitor_integration_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Native monitor tests failed.' }
-    & (Join-Path $PSScriptRoot 'monitor_cli_tests.ps1') -ApplicationPath (Join-Path $projectRoot 'Release\MinimizeWindows.exe')
+    & (Join-Path $PSScriptRoot 'monitor_cli_tests.ps1') -ApplicationPath $releaseApplication
 }
 finally {
     Pop-Location

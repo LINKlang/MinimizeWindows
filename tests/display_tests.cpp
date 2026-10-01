@@ -229,15 +229,24 @@ int main()
 
     fixture = Dual();
     const MonitorTarget target{L"\\\\.\\DISPLAY1"};
+    std::vector<std::wstring> saved_devices{target.device_name};
+    bool save_fails = false;
+    int saves = 0;
+    const SaveMonitorSelection save = [&](const std::vector<std::wstring>& devices, std::wstring& error) {
+        ++saves;
+        if (save_fails) { error = L"Configuration file is locked."; return false; }
+        saved_devices = devices;
+        return true;
+    };
     const HICON icon = LoadIconW(nullptr, IDI_APPLICATION);
     SettingsWindow frame;
-    Check(frame.Show(icon, target), "create settings with Display tab");
+    Check(frame.Show(icon, saved_devices, save), "create settings with Display tab");
     Check(Bounds(frame).right == 800 && Bounds(frame).bottom == 640, "initial client dimensions");
     const HWND integrated = GetDlgItem(frame, SettingsWindow::DisplayId);
     Check(integrated != nullptr && GetDlgItem(frame, SettingsWindow::DisplayTabId) != nullptr,
         "settings contains Display tab and page");
     const int opened_queries = query_count;
-    Check(frame.Show(icon, target) && query_count == opened_queries + 1, "re-activation refreshes snapshot");
+    Check(frame.Show(icon, saved_devices, save) && query_count == opened_queries + 1, "re-activation refreshes snapshot");
     SendMessageW(frame, WM_DISPLAYCHANGE, 0, 0);
     Check(query_count == opened_queries + 2, "display changes refresh snapshot");
     const HWND integrated_graph = GetDlgItem(integrated, DisplayPage::TopologyId);
@@ -254,7 +263,7 @@ int main()
         0, 0, 800, 584, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     Check(parent != nullptr, "create isolated page parent");
     DisplayPage page;
-    Check(page.CreatePage(parent, {0, 0, 800, 584}, target), "create independent Display controls");
+    Check(page.CreatePage(parent, {0, 0, 800, 584}, saved_devices, save), "create independent Display controls");
     const HDC measure = GetDC(parent);
     const std::wstring unbroken(240, L'A');
     std::wstring wrapped = WrapValue(measure, unbroken, 100);
@@ -278,6 +287,84 @@ int main()
     Check(query_count == before_paint, "painting never re-enumerates monitors");
     SendMessageW(GetDlgItem(page, DisplayPage::InformationId), WM_KEYDOWN, VK_END, 0);
     SaveClient(page, L"build\\tests\\display-details.bmp");
+
+    const auto button = [&](UINT id) {
+        SendMessageW(page, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(page, id)));
+    };
+    const auto click_secondary = [&] {
+        SendMessageW(graph, WM_LBUTTONDOWN, 0, MAKELPARAM((secondary.left + secondary.right) / 2,
+            (secondary.top + secondary.bottom) / 2));
+    };
+    Check(!page.Editing() && !IsWindowEnabled(GetDlgItem(page, DisplayPage::SaveId))
+        && page.IsTargetDevice(target.device_name) && !page.IsTargetDevice(L"\\\\.\\DISPLAY2"),
+        "view mode inspection does not change configured targets");
+    button(DisplayPage::ConfigureId);
+    Check(page.Editing() && IsWindowEnabled(GetDlgItem(page, DisplayPage::SaveId)), "Configure enables an editable draft and Save");
+    click_secondary();
+    Check(page.IsTargetDevice(L"\\\\.\\display2"), "topology click adds a case-insensitive draft target");
+    click_secondary();
+    Check(!page.IsTargetDevice(L"\\\\.\\DISPLAY2"), "repeated topology click removes the target");
+    SendMessageW(list, WM_LBUTTONDOWN, 0, MAKELPARAM(30, 48 + 62 + 10));
+    SendMessageW(list, WM_KEYDOWN, VK_HOME, 0);
+    Check(page.IsTargetDevice(L"\\\\.\\DISPLAY2") && page.IsTargetDevice(target.device_name),
+        "list click toggles and arrow navigation only changes inspection");
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    Check(!page.IsTargetDevice(target.device_name), "Space toggles the inspected target in edit mode");
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    page.Refresh();
+    Check(page.Editing() && page.IsTargetDevice(L"\\\\.\\DISPLAY2") && saved_devices.size() == 1,
+        "refresh retains a draft without applying it");
+    SaveClient(page, L"build\\tests\\display-configure.bmp");
+    save_fails = true;
+    button(DisplayPage::SaveId);
+    Check(page.Editing() && page.IsTargetDevice(L"\\\\.\\DISPLAY2") && saved_devices.size() == 1,
+        "save failure retains the draft and prior committed selection");
+    SaveClient(page, L"build\\tests\\display-save-error.bmp");
+    save_fails = false;
+    button(DisplayPage::SaveId);
+    Check(!page.Editing() && saved_devices.size() == 2 && !IsWindowEnabled(GetDlgItem(page, DisplayPage::SaveId)),
+        "successful Save commits all targets and leaves edit mode");
+    click_secondary();
+    Check(page.IsTargetDevice(L"\\\\.\\DISPLAY2"), "view mode click leaves committed targets unchanged");
+    button(DisplayPage::ConfigureId);
+    click_secondary();
+    button(DisplayPage::ConfigureId);
+    Check(!page.Editing() && page.IsTargetDevice(L"\\\\.\\DISPLAY2"), "Cancel discards draft changes");
+    button(DisplayPage::ConfigureId);
+    SendMessageW(list, WM_KEYDOWN, VK_HOME, 0);
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    SendMessageW(list, WM_KEYDOWN, VK_END, 0);
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    button(DisplayPage::SaveId);
+    Check(saved_devices.empty() && !page.IsTargetDevice(target.device_name), "empty selection can be saved without a primary fallback");
+
+    page.SetConfiguration({target.device_name, L"\\\\.\\DISPLAY99"});
+    SendMessageW(list, WM_LBUTTONDOWN, 0, MAKELPARAM(30, 48 + 2 * 62 + 10));
+    Check(page.SelectedMonitor() == nullptr, "unavailable configured target has an independent information entry");
+    button(DisplayPage::ConfigureId);
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    page.Refresh();
+    Check(!page.IsTargetDevice(L"\\\\.\\DISPLAY99"), "refresh preserves the removal of an unavailable target");
+    button(DisplayPage::SaveId);
+    Check(saved_devices == std::vector<std::wstring>{target.device_name} && page.SelectedMonitor() != nullptr,
+        "unavailable targets can be removed and the information selection recovers");
+    page.SetConfiguration({target.device_name, L"\\\\.\\DISPLAY2"});
+    button(DisplayPage::ConfigureId);
+    SendMessageW(list, WM_KEYDOWN, VK_HOME, 0);
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    fixture.monitors.pop_back();
+    fixture.virtual_bounds_px = fixture.monitors[0].bounds_px;
+    page.Refresh();
+    SendMessageW(list, WM_KEYDOWN, VK_END, 0);
+    Check(page.SelectedMonitor() == nullptr && page.IsTargetDevice(L"\\\\.\\DISPLAY2")
+        && !page.IsTargetDevice(target.device_name), "disconnect preserves offline membership and unsaved edits");
+    fixture = Dual();
+    page.Refresh();
+    Check(page.SelectedMonitor()->device_path == L"path2" && !page.IsTargetDevice(target.device_name),
+        "reconnection recovers the inspected output without replacing the draft");
+    button(DisplayPage::ConfigureId);
+    page.SetConfiguration({target.device_name});
+    SendMessageW(list, WM_KEYDOWN, VK_END, 0);
 
     fixture.monitors[1].device_name = L"\\\\.\\DISPLAY7";
     SendMessageW(page, WM_COMMAND, MAKEWPARAM(DisplayPage::RefreshId, BN_CLICKED),
@@ -308,6 +395,13 @@ int main()
     SendMessageW(graph, WM_LBUTTONDOWN, 0, MAKELPARAM((tiles[0].bounds.left + tiles[0].bounds.right) / 2,
         (tiles[0].bounds.top + tiles[0].bounds.bottom) / 2));
     Check(page.SelectedMonitor()->device_path == L"mirror", "clicking clone tile preserves a selection in that group");
+    button(DisplayPage::ConfigureId);
+    SendMessageW(graph, WM_LBUTTONDOWN, 0, MAKELPARAM((tiles[0].bounds.left + tiles[0].bounds.right) / 2,
+        (tiles[0].bounds.top + tiles[0].bounds.bottom) / 2));
+    Check(!page.IsTargetDevice(fixture.monitors[0].device_name), "clone tile toggles its shared GDI target once");
+    SendMessageW(list, WM_KEYDOWN, VK_SPACE, 0);
+    Check(page.IsTargetDevice(fixture.monitors[2].device_name), "clone outputs share one participation state");
+    button(DisplayPage::ConfigureId);
     SaveClient(page, L"build\\tests\\display-clones.bmp");
     fixture = Dual();
     fixture.monitors[0].friendly_name = L"非常长的中文显示器名称，用于检查信息换行和列表省略显示 — "
@@ -333,9 +427,18 @@ int main()
     Check(limits.ptMinTrackSize.x == minimum.right - minimum.left, "minimum frame width contains 640px client");
     frame.SetWindowPos(nullptr, 0, 0, limits.ptMinTrackSize.x, limits.ptMinTrackSize.y, SWP_NOMOVE | SWP_NOZORDER);
     SaveClient(frame, L"build\\tests\\display-minimum.bmp");
+    const int before_close_saves = saves;
+    SendMessageW(integrated, WM_COMMAND, MAKEWPARAM(DisplayPage::ConfigureId, BN_CLICKED),
+        reinterpret_cast<LPARAM>(GetDlgItem(integrated, DisplayPage::ConfigureId)));
+    SendMessageW(GetDlgItem(integrated, DisplayPage::ListId), WM_KEYDOWN, VK_HOME, 0);
+    SendMessageW(GetDlgItem(integrated, DisplayPage::ListId), WM_KEYDOWN, VK_SPACE, 0);
+    Check(frame.Show(icon, saved_devices, save)
+        && IsWindowEnabled(GetDlgItem(integrated, DisplayPage::SaveId)), "re-activation retains an existing edit session");
     frame.DestroyWindow();
     Pump();
-    Check(frame.Show(icon, target), "closed settings can reopen with Display controls");
+    Check(frame.Show(icon, saved_devices, save), "closed settings can reopen with Display controls");
+    Check(saves == before_close_saves && !IsWindowEnabled(GetDlgItem(GetDlgItem(frame, SettingsWindow::DisplayId), DisplayPage::SaveId)),
+        "closing discards unsaved edits and reopening returns to view mode");
     frame.DestroyWindow();
     Pump();
     _Module.RemoveMessageLoop();

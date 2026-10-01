@@ -7,10 +7,11 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
 struct AppConfig {
-    // Empty selects the primary monitor at startup; otherwise use a GDI device name.
-    std::wstring monitor_device;
+    // An explicitly empty list disables Win+D interception.
+    std::vector<std::wstring> monitor_devices;
 };
 
 class ConfigStore {
@@ -20,7 +21,8 @@ public:
     explicit ConfigStore(std::wstring file_path) : file_path_(std::move(file_path)) { }
 
     // Missing files are created with defaults. Invalid/unreadable files are preserved.
-    bool LoadOrCreate(AppConfig& config, std::wstring& error) const;
+    // Defaults also resolve the empty/missing selection in version-1 files.
+    bool LoadOrCreate(AppConfig& config, const AppConfig& defaults, std::wstring& error) const;
     // Writes UTF-8 through a temporary file in the same directory before replacing.
     bool Save(const AppConfig& config, std::wstring& error) const;
     const std::wstring& Path() const { return file_path_; }

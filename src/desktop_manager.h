@@ -16,10 +16,10 @@ struct WindowRecord {
     HWND hwnd;
     DWORD processId;
     DWORD threadId;
+    std::wstring device_name;
 };
 
 struct WindowBatch {
-    std::wstring device_name;
     std::vector<WindowRecord> windows;
 };
 
@@ -32,7 +32,9 @@ public:
 
     // Start, toggle and destroy on the same thread, which must pump messages.
     bool StartTracking();
-    void ToggleDesktop(const MonitorTarget& target);
+    void ToggleDesktop(const std::vector<MonitorTarget>& targets);
+    // Called after a configuration commit; does not change any window state.
+    void DiscardUnselectedRecords(const std::vector<MonitorTarget>& targets);
 
 private:
     static void CALLBACK WindowEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,

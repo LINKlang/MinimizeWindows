@@ -14,10 +14,20 @@ bool SameDevice(const std::wstring& first, const std::wstring& second)
     return _wcsicmp(first.c_str(), second.c_str()) == 0;
 }
 
-struct MonitorLookup {
-    const std::wstring& device_name;
+struct ResolvedMonitor {
+    std::wstring device_name;
     HMONITOR monitor = nullptr;
 };
+
+using MonitorLookup = std::vector<ResolvedMonitor>;
+
+const ResolvedMonitor* FindResolved(const MonitorLookup& targets, const std::wstring& device)
+{
+    const auto found = std::find_if(targets.begin(), targets.end(), [&](const ResolvedMonitor& target) {
+        return SameDevice(target.device_name, device);
+    });
+    return found != targets.end() ? &*found : nullptr;
+}
 
 BOOL CALLBACK FindTargetMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM data)
 {
@@ -27,8 +37,8 @@ BOOL CALLBACK FindTargetMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM data)
     if (!GetMonitorInfoW(monitor, &info)) {
         return FALSE;
     }
-    if (_wcsicmp(info.szDevice, lookup.device_name.c_str()) == 0) {
-        lookup.monitor = monitor;
+    for (auto& target : lookup) {
+        if (_wcsicmp(info.szDevice, target.device_name.c_str()) == 0) { target.monitor = monitor; }
     }
     return TRUE;
 }
@@ -129,7 +139,7 @@ void EraseWindow(WindowBatch& batch, HWND hwnd)
 }
 
 struct WindowScan {
-    HMONITOR monitor;
+    const MonitorLookup& targets;
     bool blocking = false;
     std::vector<WindowRecord> windows;
 };
@@ -137,15 +147,19 @@ struct WindowScan {
 BOOL CALLBACK CollectWindows(HWND hwnd, LPARAM data)
 {
     auto& scan = *reinterpret_cast<WindowScan*>(data);
-    if (ClassifyWindow(hwnd) != WindowClassification::ShouldMinimize || IsIconic(hwnd)
-        || MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != scan.monitor) {
+    if (ClassifyWindow(hwnd) != WindowClassification::ShouldMinimize || IsIconic(hwnd)) {
         return TRUE;
     }
+    const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    const auto target = std::find_if(scan.targets.begin(), scan.targets.end(), [&](const ResolvedMonitor& current) {
+        return current.monitor != nullptr && current.monitor == monitor;
+    });
+    if (target == scan.targets.end()) { return TRUE; }
     scan.blocking = true;
-    WindowRecord record{hwnd, 0, 0};
+    WindowRecord record{hwnd, 0, 0, {}};
     record.threadId = GetWindowThreadProcessId(hwnd, &record.processId);
     if (record.processId == 0 || record.threadId == 0) { return TRUE; }
-    try { scan.windows.push_back(record); }
+    try { record.device_name = target->device_name; scan.windows.push_back(std::move(record)); }
     catch (const std::bad_alloc&) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
     return TRUE;
 }
@@ -196,44 +210,83 @@ void CALLBACK DesktopManager::WindowEventProc(HWINEVENTHOOK hook, DWORD event, H
     EraseWindow(self->restoreBatch_, hwnd);
 }
 
-void DesktopManager::ToggleDesktop(const MonitorTarget& target)
+void DesktopManager::DiscardUnselectedRecords(const std::vector<MonitorTarget>& targets)
 {
-    if (event_hook_ == nullptr || tracking_thread_ != GetCurrentThreadId() || target.device_name.empty()) {
+    const auto discard = [&](WindowBatch& batch) {
+        batch.windows.erase(std::remove_if(batch.windows.begin(), batch.windows.end(),
+            [&](const WindowRecord& record) {
+                return std::none_of(targets.begin(), targets.end(), [&](const MonitorTarget& target) {
+                    return SameDevice(target.device_name, record.device_name);
+                });
+            }), batch.windows.end());
+    };
+    discard(candidateBatch_);
+    discard(restoreBatch_);
+}
+
+void DesktopManager::ToggleDesktop(const std::vector<MonitorTarget>& targets)
+{
+    if (event_hook_ == nullptr || tracking_thread_ != GetCurrentThreadId() || targets.empty()) {
         return;
     }
     try {
-        MonitorLookup lookup{target.device_name};
+        MonitorLookup lookup;
+        lookup.reserve(targets.size());
+        for (const auto& target : targets) {
+            if (!target.device_name.empty() && FindResolved(lookup, target.device_name) == nullptr) {
+                lookup.push_back({target.device_name, nullptr});
+            }
+        }
         if (!EnumDisplayMonitors(nullptr, nullptr, FindTargetMonitor,
-                reinterpret_cast<LPARAM>(&lookup)) || lookup.monitor == nullptr) {
+                reinterpret_cast<LPARAM>(&lookup))) {
             return;
         }
-        WindowScan scan{lookup.monitor};
-        if (!EnumWindows(CollectWindows, reinterpret_cast<LPARAM>(&scan))
-            || !TargetStillAvailable(lookup.monitor, target.device_name)) {
-            return;
+        if (std::none_of(lookup.begin(), lookup.end(), [](const ResolvedMonitor& target) {
+                return target.monitor != nullptr;
+            })) { return; }
+        WindowScan scan{lookup};
+        if (!EnumWindows(CollectWindows, reinterpret_cast<LPARAM>(&scan))) { return; }
+        for (const auto& target : lookup) {
+            if (target.monitor != nullptr && !TargetStillAvailable(target.monitor, target.device_name)) { return; }
         }
 
-        if (SameDevice(candidateBatch_.device_name, target.device_name)) {
-            // WinEvent may erase members during a window query. Iterate a copy.
-            const auto candidates = candidateBatch_.windows;
-            for (const auto& record : candidates) {
-                if (!TargetStillAvailable(lookup.monitor, target.device_name)) { return; }
-                if (!ValidateRecord(record, lookup.monitor)) { EraseRecord(candidateBatch_, record); }
+        // WinEvent may erase records during an API call. Never retain batch iterators.
+        WindowBatch promoted;
+        const auto candidates = candidateBatch_.windows;
+        for (const auto& record : candidates) {
+            const auto target = FindResolved(lookup, record.device_name);
+            if (target == nullptr || target->monitor == nullptr) { continue; }
+            if (!TargetStillAvailable(target->monitor, record.device_name)) { return; }
+            if (!ValidateRecord(record, target->monitor)) { EraseRecord(candidateBatch_, record); }
+            else if (ContainsRecord(candidateBatch_, record)) { promoted.windows.push_back(record); }
+        }
+        if (!promoted.windows.empty()) {
+            // Preserve pending records for selected offline devices; validate on use
+            // after reconnection. A new successful online batch still replaces them.
+            for (const auto& record : candidateBatch_.windows) {
+                const auto target = FindResolved(lookup, record.device_name);
+                if (target != nullptr && target->monitor == nullptr) { promoted.windows.push_back(record); }
             }
-            if (!candidateBatch_.windows.empty()) { restoreBatch_ = std::move(candidateBatch_); }
-            candidateBatch_ = {};
+            // A later query may have delivered a restore event for an earlier record.
+            promoted.windows.erase(std::remove_if(promoted.windows.begin(), promoted.windows.end(),
+                [&](const WindowRecord& record) { return !ContainsRecord(candidateBatch_, record); }), promoted.windows.end());
+            if (!promoted.windows.empty()) {
+                restoreBatch_ = std::move(promoted);
+                for (const auto& record : restoreBatch_.windows) { EraseRecord(candidateBatch_, record); }
+            }
         }
 
         if (scan.blocking) {
             WindowBatch next;
-            next.device_name = target.device_name;
             next.windows.reserve(scan.windows.size());
             candidateBatch_ = std::move(next);
             for (const auto& record : scan.windows) {
-                if (!TargetStillAvailable(lookup.monitor, target.device_name)) { return; }
+                const auto target = FindResolved(lookup, record.device_name);
+                if (target == nullptr || target->monitor == nullptr
+                    || !TargetStillAvailable(target->monitor, record.device_name)) { return; }
                 if (!SameIdentity(record) || ClassifyWindow(record.hwnd) != WindowClassification::ShouldMinimize
                     || IsIconic(record.hwnd)
-                    || MonitorFromWindow(record.hwnd, MONITOR_DEFAULTTONEAREST) != lookup.monitor) {
+                    || MonitorFromWindow(record.hwnd, MONITOR_DEFAULTTONEAREST) != target->monitor) {
                     continue;
                 }
                 // Register before the API call so an intervening restore can revoke it.
@@ -245,13 +298,14 @@ void DesktopManager::ToggleDesktop(const MonitorTarget& target)
             return;
         }
 
-        if (!SameDevice(restoreBatch_.device_name, target.device_name)) { return; }
         const auto records = restoreBatch_.windows;
         for (auto iterator = records.rbegin(); iterator != records.rend(); ++iterator) {
             const WindowRecord record = *iterator;
             if (!ContainsRecord(restoreBatch_, record)) { continue; }
-            if (!TargetStillAvailable(lookup.monitor, target.device_name)) { return; }
-            if (!ValidateRecord(record, lookup.monitor)) {
+            const auto target = FindResolved(lookup, record.device_name);
+            if (target == nullptr || target->monitor == nullptr) { continue; }
+            if (!TargetStillAvailable(target->monitor, record.device_name)) { return; }
+            if (!ValidateRecord(record, target->monitor)) {
                 EraseRecord(restoreBatch_, record);
                 continue;
             }

@@ -8,7 +8,7 @@ public:
     DECLARE_FRAME_WND_CLASS_EX(L"MinimizeWindows.Settings", 0, 0, COLOR_WINDOW)
 
     static constexpr UINT DisplayId = 200, DisplayTabId = 199;
-    bool Show(HICON icon, const MonitorTarget& target);
+    bool Show(HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save);
     BOOL PreTranslateMessage(MSG* message) override;
 
     BEGIN_MSG_MAP(SettingsWindow)
@@ -42,7 +42,8 @@ private:
     LRESULT OnTab(WORD, WORD, HWND, BOOL&);
     LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
     LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled);
-    MonitorTarget initial_target_;
+    std::vector<std::wstring> configured_devices_;
+    SaveMonitorSelection save_;
     DisplayPage display_;
     HWND tab_ = nullptr;
     HFONT tab_font_ = nullptr;

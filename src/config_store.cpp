@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <nlohmann/json.hpp>
 #include <climits>
+#include <algorithm>
 #include <new>
 
 namespace {
@@ -75,7 +76,7 @@ bool ConfigStore::UserFilePath(std::wstring& path, std::wstring& error)
     return true;
 }
 
-bool ConfigStore::LoadOrCreate(AppConfig& config, std::wstring& error) const
+bool ConfigStore::LoadOrCreate(AppConfig& config, const AppConfig& defaults, std::wstring& error) const
 {
     config = {};
     error.clear();
@@ -87,11 +88,11 @@ bool ConfigStore::LoadOrCreate(AppConfig& config, std::wstring& error) const
             if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
                 return IoError(file_path_, error, L"Cannot open the file", code);
             }
-            if (Write(config, false, error)) { return true; }
+            if (Write(defaults, false, error)) { config = defaults; return true; }
             // Another instance may have created the file after our initial check.
             const DWORD write_error = GetLastError();
             if (write_error == ERROR_ALREADY_EXISTS || write_error == ERROR_FILE_EXISTS) {
-                return LoadOrCreate(config, error);
+                return LoadOrCreate(config, defaults, error);
             }
             return false;
         }
@@ -110,19 +111,46 @@ bool ConfigStore::LoadOrCreate(AppConfig& config, std::wstring& error) const
         if (count != bytes.size()) {
             return Fail(file_path_, error, L"The file changed while being read.", ERROR_READ_FAULT);
         }
+        // Finish reading before migration replaces this same pathname.
+        if (!CloseHandle(file.handle)) { return IoError(file_path_, error, L"Cannot close the file", GetLastError()); }
+        file.handle = INVALID_HANDLE_VALUE;
         const auto document = nlohmann::json::parse(bytes);
         if (!document.is_object()) { return Fail(file_path_, error, L"The JSON root must be an object."); }
         const auto version = document.find("version");
-        if (version != document.end() && (!version->is_number_integer() || *version != 1)) {
-            return Fail(file_path_, error, L"Unsupported configuration version; expected version 1.");
+        if (version != document.end() && (!version->is_number_integer() || (*version != 1 && *version != 2))) {
+            return Fail(file_path_, error, L"Unsupported configuration version; expected version 1 or 2.");
         }
-        const auto device = document.find("monitor_device");
-        if (device == document.end()) { return true; }
-        if (!device->is_string()) { return Fail(file_path_, error, L"monitor_device must be a string."); }
         AppConfig loaded;
-        if (!FromUtf8(device->get<std::string>(), loaded.monitor_device)
-            || loaded.monitor_device.find(L'\0') != std::wstring::npos) {
-            return Fail(file_path_, error, L"monitor_device must contain valid Unicode without null characters.");
+        const bool legacy = version == document.end() || *version == 1;
+        const auto read_device = [&](const nlohmann::json& value) {
+            std::wstring name;
+            if (!value.is_string() || !FromUtf8(value.get<std::string>(), name)
+                || name.find(L'\0') != std::wstring::npos) { return false; }
+            if (name.empty()) { return legacy; }
+            if (std::none_of(loaded.monitor_devices.begin(), loaded.monitor_devices.end(),
+                    [&](const std::wstring& current) { return _wcsicmp(current.c_str(), name.c_str()) == 0; })) {
+                loaded.monitor_devices.push_back(std::move(name));
+            }
+            return true;
+        };
+        if (legacy) {
+            const auto device = document.find("monitor_device");
+            if (device != document.end() && !read_device(*device)) {
+                return Fail(file_path_, error, L"monitor_device must be a Unicode string without null characters.");
+            }
+            if (loaded.monitor_devices.empty()) { loaded = defaults; }
+            if (!Save(loaded, error)) { return false; }
+        }
+        else {
+            const auto devices = document.find("monitor_devices");
+            if (devices == document.end() || !devices->is_array()) {
+                return Fail(file_path_, error, L"monitor_devices must be an array of device names.");
+            }
+            for (const auto& device : *devices) {
+                if (!read_device(device)) {
+                    return Fail(file_path_, error, L"monitor_devices must contain nonempty Unicode strings without null characters.");
+                }
+            }
         }
         config = std::move(loaded);
         return true;
@@ -141,11 +169,21 @@ bool ConfigStore::Write(const AppConfig& config, bool replace, std::wstring& err
 {
     error.clear();
     try {
-        std::string device;
-        if (!ToUtf8(config.monitor_device, device)) {
-            return Fail(file_path_, error, L"monitor_device must contain valid Unicode without null characters.");
+        nlohmann::json devices = nlohmann::json::array();
+        std::vector<std::wstring> seen;
+        for (const auto& name : config.monitor_devices) {
+            std::string device;
+            if (name.empty() || !ToUtf8(name, device)) {
+                return Fail(file_path_, error, L"monitor_devices must contain nonempty Unicode strings without null characters.");
+            }
+            if (std::none_of(seen.begin(), seen.end(), [&](const std::wstring& current) {
+                    return _wcsicmp(current.c_str(), name.c_str()) == 0;
+                })) {
+                devices.push_back(std::move(device));
+                seen.push_back(name);
+            }
         }
-        const nlohmann::json document{{"version", 1}, {"monitor_device", device}};
+        const nlohmann::json document{{"version", 2}, {"monitor_devices", std::move(devices)}};
         const std::string bytes = document.dump(2) + "\n";
         const size_t separator = file_path_.find_last_of(L"\\/");
         if (separator == std::wstring::npos) {

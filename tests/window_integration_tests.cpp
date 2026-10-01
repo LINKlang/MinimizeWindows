@@ -177,14 +177,14 @@ int wmain(int argument_count, wchar_t* arguments[])
     RECT chrome_bounds;
     Check(GetWindowRect(chrome, &chrome_bounds) != FALSE, "read original window bounds");
 
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(manual)
         && (spanning == nullptr || IsIconic(spanning)); }, "minimize only target monitor windows");
     Check(!IsIconic(tool), "leave tool window alone");
     Check(foreign == nullptr || (!IsIconic(foreign) && IsIconic(foreign_manual)),
         "other monitor retains visible and manually minimized windows");
 
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     WaitFor([&] { return !IsIconic(chrome) && !IsIconic(code)
         && (spanning == nullptr || !IsIconic(spanning)); },
         "restore only our target windows despite visible windows on another monitor");
@@ -196,38 +196,55 @@ int wmain(int argument_count, wchar_t* arguments[])
     Check(GetWindowRect(chrome, &restored_bounds) != FALSE
         && EqualRect(&chrome_bounds, &restored_bounds), "restore normal window position and size");
 
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && (spanning == nullptr || IsIconic(spanning)); },
         "minimize first batch again");
     const HWND notepad = create_window(monitors.front().info.rcWork);
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     WaitFor([&] { return IsIconic(notepad); }, "new window creates a new candidate batch");
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     WaitFor([&] { return !IsIconic(notepad); }, "restore only latest successful batch");
     Check(IsIconic(chrome) && IsIconic(code) && IsIconic(manual)
         && (spanning == nullptr || IsIconic(spanning)), "older batch remains minimized");
 
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     WaitFor([&] { return IsIconic(notepad); }, "prepare manual restore and re-minimize test");
     const unsigned int before_manual_restore = restore_events;
     ShowWindow(notepad, SW_RESTORE);
     ShowWindow(notepad, SW_MINIMIZE);
     WaitFor([&] { return restore_events > before_manual_restore && IsIconic(notepad); },
         "deliver restore event after the fixture is already re-minimized");
-    manager.ToggleDesktop(target);
+    manager.ToggleDesktop({target});
     Check(IsIconic(notepad), "manual restore permanently revokes a candidate even after re-minimize");
 
     if (foreign != nullptr) {
         const MonitorTarget second{monitors[1].info.szDevice};
-        manager.ToggleDesktop(second);
+        manager.ToggleDesktop({second});
         WaitFor([&] { return IsIconic(foreign) && IsIconic(foreign_manual); }, "minimize non-primary target");
-        manager.ToggleDesktop(target);
+        manager.ToggleDesktop({target});
         Check(IsIconic(foreign), "first monitor cannot promote or restore second monitor's candidate");
-        manager.ToggleDesktop(second);
+        manager.ToggleDesktop({second});
         WaitFor([&] { return !IsIconic(foreign); }, "restore non-primary target after switching back");
         Check(IsIconic(foreign_manual), "manually minimized non-primary window stays minimized");
         Check(IsIconic(chrome) && IsIconic(code) && IsIconic(notepad),
             "switching the target never restores the first monitor");
+        ShowWindow(chrome, SW_RESTORE);
+        ShowWindow(code, SW_SHOWMAXIMIZED);
+        WaitFor([&] { return !IsIconic(chrome) && !IsIconic(code); }, "prepare grouped native windows");
+        manager.ToggleDesktop({target, second});
+        WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(foreign); },
+            "grouped toggle minimizes ordinary windows on both selected screens");
+        manager.ToggleDesktop({target, second});
+        WaitFor([&] { return !IsIconic(chrome) && !IsIconic(code) && !IsIconic(foreign); },
+            "grouped restore uses each window's source monitor");
+        Check(IsIconic(manual) && IsIconic(foreign_manual) && IsZoomed(code),
+            "grouped restore preserves manual minimizations and maximized state");
+        manager.ToggleDesktop({target, second});
+        WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(foreign); }, "prepare target removal");
+        manager.DiscardUnselectedRecords({second});
+        manager.ToggleDesktop({second});
+        WaitFor([&] { return !IsIconic(foreign); }, "target removal retains the selected screen's restore batch");
+        Check(IsIconic(chrome) && IsIconic(code), "target removal never restores deselected screen windows");
     }
 
     if (argument_count > 1) {

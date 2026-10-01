@@ -94,7 +94,7 @@ LRESULT CALLBACK KeyboardHook::KeyboardProc(int code, WPARAM message, LPARAM dat
             || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0
             || (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
-        const bool notified = win_down && !extra_modifier
+        const bool notified = self->enabled_ && win_down && !extra_modifier
             && (self->notification_window_ != nullptr
                 ? PostMessageW(self->notification_window_, WinDMessage, 0, 0)
                 : PostThreadMessageW(self->thread_id_, WinDMessage, 0, 0));

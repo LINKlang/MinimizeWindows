@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <initializer_list>
 
-int RunTrayApplication(HINSTANCE, const MonitorTarget&)
+int RunTrayApplication(HINSTANCE, const ConfigStore&, const AppConfig&)
 {
     // These tests exercise enumeration and formatting only, never the GUI path.
     std::abort();

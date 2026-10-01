@@ -2,11 +2,12 @@
 
 #include <algorithm>
 
-bool SettingsWindow::Show(HICON icon, const MonitorTarget& target)
+bool SettingsWindow::Show(HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save)
 {
     const bool creating = !IsWindow();
     if (creating) {
-        initial_target_ = target;
+        configured_devices_ = devices;
+        save_ = std::move(save);
         const UINT dpi = DisplayWindowDpi(nullptr);
         RECT bounds{0, 0, MulDiv(800, dpi, 96), MulDiv(640, dpi, 96)};
         AdjustWindowRectEx(&bounds, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW);
@@ -18,6 +19,7 @@ bool SettingsWindow::Show(HICON icon, const MonitorTarget& target)
         SetIcon(icon, FALSE);
         CenterWindow();
     }
+    display_.SetConfiguration(devices);
     display_.Refresh();
     ShowWindow(IsIconic() ? SW_RESTORE : SW_SHOW);
     // Override the launcher's hidden/minimized STARTUPINFO on explicit activation.
@@ -39,7 +41,7 @@ LRESULT SettingsWindow::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
         0, 0, 0, 0, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(DisplayTabId)),
         _Module.GetModuleInstance(), nullptr);
     RECT empty{};
-    if (tab_ == nullptr || !display_.CreatePage(m_hWnd, empty, initial_target_)) { return -1; }
+    if (tab_ == nullptr || !display_.CreatePage(m_hWnd, empty, configured_devices_, save_)) { return -1; }
     display_.SetDlgCtrlID(DisplayId);
     loop_ = _Module.GetMessageLoop();
     if (loop_ != nullptr) { loop_->AddMessageFilter(this); }

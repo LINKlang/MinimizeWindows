@@ -20,6 +20,7 @@ public:
     // A notification window must belong to the installing thread.
     bool Install(HWND notification_window = nullptr);
     void Uninstall();
+    void SetEnabled(bool enabled) { enabled_ = enabled; }
 
 private:
     static LRESULT CALLBACK KeyboardProc(int code, WPARAM message, LPARAM data);
@@ -30,4 +31,5 @@ private:
     HWND notification_window_ = nullptr;
     bool d_down_ = false;
     bool d_intercepted_ = false;
+    bool enabled_ = true;
 };

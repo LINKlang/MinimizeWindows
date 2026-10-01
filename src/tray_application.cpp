@@ -14,8 +14,12 @@ public:
     static constexpr UINT TrayIconId = 1;
     static constexpr UINT ExitCommand = 100;
 
-    TrayApplication(const MonitorTarget& target, WTL::CMessageLoop& loop)
-        : target_(target), loop_(loop) { }
+    TrayApplication(const ConfigStore& store, const AppConfig& config, WTL::CMessageLoop& loop)
+        : store_(store), config_(config), loop_(loop)
+    {
+        for (const auto& device : config.monitor_devices) { targets_.push_back({device}); }
+        keyboard_hook_.SetEnabled(!targets_.empty());
+    }
     ~TrayApplication() { Shutdown(); }
     TrayApplication(const TrayApplication&) = delete;
     TrayApplication& operator=(const TrayApplication&) = delete;
@@ -105,9 +109,27 @@ private:
 
     void ShowSettings()
     {
-        if (!closing_ && !settings_.Show(icon_, target_)) {
+        if (!closing_ && !settings_.Show(icon_, config_.monitor_devices,
+                [this](const std::vector<std::wstring>& devices, std::wstring& error) {
+                    return SaveConfiguration(devices, error);
+                })) {
             OutputDebugStringW(L"MinimizeWindows: settings window creation failed.\n");
         }
+    }
+
+    bool SaveConfiguration(const std::vector<std::wstring>& devices, std::wstring& error)
+    {
+        // Allocate the complete new runtime state before committing the file.
+        AppConfig next{devices};
+        std::vector<MonitorTarget> targets;
+        targets.reserve(devices.size());
+        for (const auto& device : devices) { targets.push_back({device}); }
+        if (!store_.Save(next, error)) { return false; }
+        config_ = std::move(next);
+        targets_ = std::move(targets);
+        desktop_manager_.DiscardUnselectedRecords(targets_);
+        keyboard_hook_.SetEnabled(!targets_.empty());
+        return true;
     }
 
     void ShowMenu()
@@ -151,7 +173,7 @@ private:
 
     LRESULT OnWinD(UINT, WPARAM, LPARAM, BOOL&)
     {
-        if (!closing_) { desktop_manager_.ToggleDesktop(target_); }
+        if (!closing_) { desktop_manager_.ToggleDesktop(targets_); }
         return 0;
     }
 
@@ -177,7 +199,9 @@ private:
         return 0;
     }
 
-    MonitorTarget target_;
+    const ConfigStore& store_;
+    AppConfig config_;
+    std::vector<MonitorTarget> targets_;
     WTL::CMessageLoop& loop_;
     DesktopManager desktop_manager_;
     KeyboardHook keyboard_hook_;
@@ -189,7 +213,7 @@ private:
     bool running_ = false;
 };
 
-int RunTrayApplication(HINSTANCE instance, const MonitorTarget& target)
+int RunTrayApplication(HINSTANCE instance, const ConfigStore& store, const AppConfig& config)
 {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(com)) { SetLastError(ERROR_GEN_FAILURE); return 1; }
@@ -211,7 +235,7 @@ int RunTrayApplication(HINSTANCE instance, const MonitorTarget& target)
     else if (!_Module.AddMessageLoop(&loop)) { error = ERROR_NOT_ENOUGH_MEMORY; }
     else {
         try {
-            TrayApplication application(target, loop);
+            TrayApplication application(store, config, loop);
             if (application.Initialize()) { result = application.Run(); }
             else { error = GetLastError(); }
         }
