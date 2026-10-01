@@ -1,6 +1,7 @@
 #include "keyboard_hook.h"
 #include "desktop_manager.h"
 #include "monitor_enumerator.h"
+#include "tray_application.h"
 
 #include <shellapi.h>
 
@@ -316,7 +317,7 @@ int ListMonitors()
 
 } // namespace
 
-int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
+int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
 {
     int argument_count = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
@@ -348,30 +349,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         }
     }
 
-    DesktopManager desktop_manager;
-    if (!desktop_manager.StartTracking()) {
-        return ReportStartupError(FormatError(L"Window restore event tracking", GetLastError()));
-    }
-    KeyboardHook keyboard_hook;
-    if (!keyboard_hook.Install()) {
-        OutputDebugStringW(L"MinimizeWindows: keyboard hook installation failed.\n");
-        return 1;
-    }
-
-    MSG message;
-    int result;
-    while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {
-        if (message.hwnd == nullptr && message.message == KeyboardHook::WinDMessage) {
-            desktop_manager.ToggleDesktop(target);
-        }
-        else {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-
-    if (result == -1) {
-        return 1;
-    }
-    return 0;
+    const int result = RunTrayApplication(instance, target);
+    if (result != 0) { return ReportStartupError(FormatError(L"Tray application startup", GetLastError())); }
+    return result;
 }

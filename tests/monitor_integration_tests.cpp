@@ -6,6 +6,12 @@
 #include <cstdlib>
 #include <initializer_list>
 
+int RunTrayApplication(HINSTANCE, const MonitorTarget&)
+{
+    // These tests exercise enumeration and formatting only, never the GUI path.
+    std::abort();
+}
+
 namespace {
 
 void Require(bool condition, const char* message)

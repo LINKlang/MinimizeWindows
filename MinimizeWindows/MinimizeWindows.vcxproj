@@ -56,11 +56,12 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\third_party\wtl\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -73,6 +74,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\third_party\wtl\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -80,7 +82,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -88,11 +90,16 @@
     <ClCompile Include="..\src\keyboard_hook.cpp" />
     <ClCompile Include="..\src\desktop_manager.cpp" />
     <ClCompile Include="..\src\monitor_enumerator.cpp" />
+    <ClCompile Include="..\src\tray_application.cpp" />
+    <ClCompile Include="..\src\settings_window.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\keyboard_hook.h" />
     <ClInclude Include="..\src\desktop_manager.h" />
     <ClInclude Include="..\src\monitor_enumerator.h" />
+    <ClInclude Include="..\src\tray_application.h" />
+    <ClInclude Include="..\src\settings_window.h" />
+    <ClInclude Include="..\src\wtl_support.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

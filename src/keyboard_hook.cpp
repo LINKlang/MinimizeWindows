@@ -7,9 +7,13 @@ KeyboardHook::~KeyboardHook()
     Uninstall();
 }
 
-bool KeyboardHook::Install()
+bool KeyboardHook::Install(HWND notification_window)
 {
     if (hook_ != nullptr) {
+        if (notification_window_ != notification_window) {
+            SetLastError(ERROR_ALREADY_EXISTS);
+            return false;
+        }
         return true;
     }
 
@@ -18,13 +22,21 @@ bool KeyboardHook::Install()
         return false;
     }
 
-    // PostThreadMessage requires an existing message queue.
+    const DWORD thread = GetCurrentThreadId();
+    if (notification_window != nullptr && GetWindowThreadProcessId(notification_window, nullptr) != thread) {
+        SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        return false;
+    }
+
+    // The legacy thread notification path requires an existing message queue.
     MSG message;
     PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
-    thread_id_ = GetCurrentThreadId();
+    thread_id_ = thread;
+    notification_window_ = notification_window;
     hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, nullptr, 0);
     if (hook_ == nullptr) {
         thread_id_ = 0;
+        notification_window_ = nullptr;
         return false;
     }
 
@@ -44,6 +56,7 @@ void KeyboardHook::Uninstall()
         active_hook_ = nullptr;
     }
     thread_id_ = 0;
+    notification_window_ = nullptr;
     d_down_ = false;
     d_intercepted_ = false;
 }
@@ -81,8 +94,11 @@ LRESULT CALLBACK KeyboardHook::KeyboardProc(int code, WPARAM message, LPARAM dat
             || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0
             || (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
-        if (win_down && !extra_modifier
-            && PostThreadMessageW(self->thread_id_, WinDMessage, 0, 0)) {
+        const bool notified = win_down && !extra_modifier
+            && (self->notification_window_ != nullptr
+                ? PostMessageW(self->notification_window_, WinDMessage, 0, 0)
+                : PostThreadMessageW(self->thread_id_, WinDMessage, 0, 0));
+        if (notified) {
             self->d_intercepted_ = true;
 
             // Mark Win as used so releasing it does not open the Start menu.

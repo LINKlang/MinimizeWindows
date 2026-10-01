@@ -265,10 +265,15 @@ int wmain(int argument_count, wchar_t* arguments[])
             }
             Check(ResumeThread(child.hThread) != static_cast<DWORD>(-1), "resume isolated app");
             Check(WaitForInputIdle(child.hProcess, 5000) == 0, "app installs hook and enters message loop");
-            Check(PostThreadMessageW(child.dwThreadId, KeyboardHook::WinDMessage, 0, 0) != FALSE,
+            const HWND notification = FindWindowW(L"MinimizeWindows.TrayHost", nullptr);
+            DWORD notification_process = 0;
+            GetWindowThreadProcessId(notification, &notification_process);
+            Check(notification != nullptr && notification_process == child.dwProcessId,
+                "resolve child app's hidden tray controller");
+            Check(PostMessageW(notification, KeyboardHook::WinDMessage, 0, 0) != FALSE,
                 "notify native app of first Win+D");
             WaitFor(first_state, "native app selects the expected monitor on first message");
-            Check(PostThreadMessageW(child.dwThreadId, KeyboardHook::WinDMessage, 0, 0) != FALSE,
+            Check(PostMessageW(notification, KeyboardHook::WinDMessage, 0, 0) != FALSE,
                 "notify native app of second Win+D");
             WaitFor(second_state, "native app selects the expected monitor on second message");
             Check(PostThreadMessageW(child.dwThreadId, WM_QUIT, 0, 0) != FALSE, "request normal app shutdown");

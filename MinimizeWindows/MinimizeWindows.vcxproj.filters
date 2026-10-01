@@ -27,6 +27,12 @@
     <ClCompile Include="..\src\monitor_enumerator.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\tray_application.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\settings_window.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\keyboard_hook.h">
@@ -36,6 +42,15 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="..\src\monitor_enumerator.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\tray_application.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\settings_window.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\wtl_support.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

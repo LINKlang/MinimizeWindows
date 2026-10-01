@@ -136,8 +136,8 @@ BOOL WINAPI IsIconic(HWND hwnd) { return GetWindow(hwnd).minimized; }
 DWORD WINAPI GetWindowThreadProcessId(HWND hwnd, LPDWORD process)
 {
     if (during_identity != nullptr) { during_identity(hwnd); }
-    if (!test::IsWindow(hwnd)) { *process = 0; return 0; }
-    *process = GetWindow(hwnd).process_id;
+    if (!test::IsWindow(hwnd)) { if (process != nullptr) { *process = 0; } return 0; }
+    if (process != nullptr) { *process = GetWindow(hwnd).process_id; }
     return GetWindow(hwnd).thread_id;
 }
 HWND WINAPI GetDesktopWindow() { return desktop; }
@@ -265,6 +265,7 @@ bool post_succeeds = true;
 int install_calls = 0;
 int uninstall_calls = 0;
 int posted_messages = 0;
+int window_messages = 0;
 int dummy_events = 0;
 constexpr LRESULT PassedThrough = 73;
 
@@ -293,6 +294,16 @@ BOOL WINAPI PostThreadMessageW(DWORD thread, UINT message, WPARAM, LPARAM)
     if (!post_succeeds) {
         return FALSE;
     }
+    ++posted_messages;
+    return TRUE;
+}
+
+BOOL WINAPI PostMessageW(HWND window, UINT message, WPARAM, LPARAM)
+{
+    Check(test::IsWindow(window) && GetWindow(window).thread_id == current_thread
+        && message == WM_APP + 1, "notification goes to the installing thread's window");
+    if (!post_succeeds) { return FALSE; }
+    ++window_messages;
     ++posted_messages;
     return TRUE;
 }
@@ -367,6 +378,8 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #define GetAsyncKeyState test::GetAsyncKeyState
 #define CallNextHookEx test::CallNextHookEx
 #define PostThreadMessageW test::PostThreadMessageW
+#define PostMessageW test::PostMessageW
+#define GetWindowThreadProcessId test::GetWindowThreadProcessId
 #define SendInput test::SendInput
 #include "../src/keyboard_hook.cpp"
 #undef SetWindowsHookExW
@@ -376,6 +389,8 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #undef GetAsyncKeyState
 #undef CallNextHookEx
 #undef PostThreadMessageW
+#undef PostMessageW
+#undef GetWindowThreadProcessId
 #undef SendInput
 
 struct DesktopFixture {
@@ -764,13 +779,28 @@ void TestKeyboard()
     hook.Uninstall();
     Check(uninstall_calls == 1, "uninstall is idempotent");
     Check(other.Install(), "another instance can install after uninstall");
+    other.Uninstall();
+    const HWND notification = AddWindow();
+    Check(!other.Install(notification) && GetLastError() == ERROR_INVALID_WINDOW_HANDLE,
+        "window notification cannot target another thread");
+    GetWindow(notification).thread_id = current_thread;
+    Check(other.Install(notification) && other.Install(notification), "install with an owned window destination");
+    Check(!other.Install() && GetLastError() == ERROR_ALREADY_EXISTS, "cannot silently change a live notification destination");
+    const int before_window = posted_messages;
+    Check(Key('D', WM_KEYDOWN) == 1 && Key('D', WM_KEYDOWN) == 1 && Key('D', WM_KEYUP) == 1
+        && window_messages == 1 && posted_messages == before_window + 1,
+        "window notification preserves interception and repeat deduplication");
+    post_succeeds = false;
+    Check(Key('D', WM_KEYDOWN) == PassedThrough && Key('D', WM_KEYDOWN) == PassedThrough
+        && Key('D', WM_KEYUP) == PassedThrough, "failed window notification passes the complete gesture through");
+    post_succeeds = true;
 }
 
 int main()
 {
     TestDesktop();
     TestKeyboard();
-    test::Check(test::uninstall_calls == 2, "destructor uninstalls the remaining hook");
+    test::Check(test::uninstall_calls == 3, "destructor uninstalls the remaining hook");
     std::puts("Desktop and keyboard behavior tests passed.");
     return 0;
 }
