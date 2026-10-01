@@ -8,6 +8,7 @@ if (-not $visualStudio) {
 $vcvars = Join-Path $visualStudio 'VC\Auxiliary\Build\vcvars32.bat'
 $testOutput = Join-Path $projectRoot 'build\tests'
 $wtlInclude = Join-Path $projectRoot 'third_party\wtl\Include'
+$jsonInclude = Join-Path $projectRoot 'third_party'
 [System.IO.Directory]::CreateDirectory($testOutput) | Out-Null
 
 Push-Location $projectRoot
@@ -32,6 +33,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Compiling startup tests failed.' }
     & (Join-Path $testOutput 'startup_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Startup tests failed.' }
+
+    $jsonFlags = ' /utf-8 /I"' + $jsonInclude + '" '
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601' + $jsonFlags + '/Fe:"' + $testOutput + '\config_tests.exe" /Fo:build\tests\ tests\config_tests.cpp src\config_store.cpp shell32.lib ole32.lib uuid.lib /link /subsystem:console'
+    & $env:ComSpec /d /s /c $compile
+    if ($LASTEXITCODE -ne 0) { throw 'Compiling configuration tests failed.' }
+    & (Join-Path $testOutput 'config_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Configuration tests failed.' }
 
     $uiFlags = ' /utf-8 /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /I"' + $wtlInclude + '" '
     $uiLibraries = ' user32.lib gdi32.lib dwmapi.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib imm32.lib'
@@ -90,7 +98,7 @@ try {
     & (Join-Path $testOutput 'monitor_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Monitor boundary tests failed.' }
 
-    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /Fe:"' + $testOutput + '\monitor_integration_tests.exe" /Fo:build\tests\ tests\monitor_integration_tests.cpp src\monitor_enumerator.cpp src\desktop_manager.cpp src\keyboard_hook.cpp user32.lib dwmapi.lib shell32.lib /link /subsystem:console'
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601' + $jsonFlags + '/Fe:"' + $testOutput + '\monitor_integration_tests.exe" /Fo:build\tests\ tests\monitor_integration_tests.cpp src\monitor_enumerator.cpp src\desktop_manager.cpp src\keyboard_hook.cpp src\config_store.cpp user32.lib dwmapi.lib shell32.lib ole32.lib uuid.lib /link /subsystem:console'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling native monitor tests failed.' }
     & (Join-Path $testOutput 'monitor_integration_tests.exe')

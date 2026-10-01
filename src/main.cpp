@@ -2,6 +2,7 @@
 #include "desktop_manager.h"
 #include "monitor_enumerator.h"
 #include "tray_application.h"
+#include "config_store.h"
 
 #include <shellapi.h>
 
@@ -15,11 +16,13 @@ namespace {
 
 const wchar_t* const UsageText =
     L"Usage:\n"
-    L"  MinimizeWindows.exe                        Use the primary monitor at startup\n"
+    L"  MinimizeWindows.exe                        Use the configured monitor (default: primary)\n"
     L"  MinimizeWindows.exe --monitor \"\\\\.\\DISPLAY2\"  Use the specified GDI device\n"
     L"  MinimizeWindows.exe --list-monitors        List active displays and exit\n"
     L"  MinimizeWindows.exe --help                 Show this help and exit\n"
     L"\nChoose a GDI device name from --list-monitors, not a display number.\n"
+    L"Configuration: %APPDATA%\\MinimizeWindows\\config.json\n"
+    L"--monitor selects and saves the target for future runs.\n"
     L"The selected device stays fixed until the program exits.\n";
 
 struct CommandLineOptions {
@@ -338,15 +341,27 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
         return PrintHelp();
     }
 
+    std::wstring config_path;
+    if (!ConfigStore::UserFilePath(config_path, error)) { return ReportStartupError(error); }
+    const ConfigStore store(config_path);
+    AppConfig config;
+    if (!store.LoadOrCreate(config, error)) { return ReportStartupError(error); }
+
     MonitorTarget target;
     {
         MonitorSnapshot snapshot;
         if (!MonitorEnumerator{}.Enumerate(snapshot)) {
             return ReportStartupError(FormatError(L"Monitor enumeration", GetLastError()));
         }
-        if (!SelectMonitorTarget(snapshot, options.monitor_device, target, error)) {
+        const std::wstring& requested = options.monitor_device.empty() ? config.monitor_device : options.monitor_device;
+        if (!SelectMonitorTarget(snapshot, requested, target, error)) {
             return ReportStartupError(error);
         }
+    }
+
+    if (config.monitor_device != target.device_name) {
+        config.monitor_device = target.device_name;
+        if (!store.Save(config, error)) { return ReportStartupError(error); }
     }
 
     const int result = RunTrayApplication(instance, target);
