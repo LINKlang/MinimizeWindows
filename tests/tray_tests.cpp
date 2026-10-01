@@ -247,6 +247,20 @@ int main()
         PostMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
         Pump();
         Check(!IsIconic(core_window), "core still restores its batch after settings is closed");
+        TrayEvent(WM_LBUTTONDBLCLK);
+        SendMessageW(Settings(), WM_COMMAND, MAKEWPARAM(SettingsWindow::AboutTabId, BN_CLICKED), 0);
+        SendMessageW(GetDlgItem(Settings(), SettingsWindow::AboutId), WM_COMMAND,
+            MAKEWPARAM(AboutPage::ThirdPartyId, BN_CLICKED), 0);
+        const HWND open_license = FindWindowW(L"#32770", L"Third-party software licenses");
+        Check(open_license != nullptr && IsWindowEnabled(Settings()), "open modeless viewer during core operation");
+        PostMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
+        Pump();
+        Check(IsIconic(core_window), "core minimizes while license dialog is open");
+        PostMessageW(notification.hWnd, KeyboardHook::WinDMessage, 0, 0);
+        Pump();
+        Check(!IsIconic(core_window) && IsWindow(open_license), "core restores while license dialog is open");
+        SendMessageW(Settings(), WM_CLOSE, 0, 0);
+        Check(!IsWindow(open_license), "Settings closure cleans up its license dialog");
         menu_action = MenuAction::CoreThenCancel;
         Stage("Tray lifecycle: modal core delivery");
         TrayEvent(WM_CONTEXTMENU);
@@ -365,12 +379,18 @@ int main()
             TrayApplication app(store, config, loop);
             Check(app.Initialize(), "initialize for tray Exit test");
             TrayEvent(WM_LBUTTONDBLCLK);
+            SendMessageW(Settings(), WM_COMMAND, MAKEWPARAM(SettingsWindow::AboutTabId, BN_CLICKED), 0);
+            SendMessageW(GetDlgItem(Settings(), SettingsWindow::AboutId), WM_COMMAND,
+                MAKEWPARAM(AboutPage::LicenseId, BN_CLICKED), 0);
+            const HWND quitting_license = FindWindowW(L"#32770", L"MinimizeWindows License");
+            Check(quitting_license != nullptr, "open license viewer before tray Exit");
             menu_action = MenuAction::Exit;
             Check(PostMessageW(notification.hWnd, notification.uCallbackMessage, legacy ? 1 : 0,
                 legacy ? static_cast<LPARAM>(WM_RBUTTONUP) : MAKELPARAM(WM_CONTEXTMENU, 1)) != FALSE,
                 "post Exit-menu request to the tray host");
             Check(app.Run() == 0 && Settings() == nullptr && !IsWindow(notification.hWnd)
                 && deletes == 1 && keyboard_removals == 1, "tray Exit closes frame, stops core and exits loop");
+            Check(!IsWindow(quitting_license), "tray Exit also destroys owned license viewer");
         }
         Check(tracking_removals == 1, "tray Exit releases restore tracking");
         Pump();

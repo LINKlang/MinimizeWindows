@@ -6,6 +6,7 @@ bool SettingsWindow::Show(HICON icon, const std::vector<std::wstring>& devices, 
 {
     const bool creating = !IsWindow();
     if (creating) {
+        showing_about_ = false;
         configured_devices_ = devices;
         save_ = std::move(save);
         const UINT dpi = DisplayWindowDpi(nullptr);
@@ -31,6 +32,7 @@ bool SettingsWindow::Show(HICON icon, const std::vector<std::wstring>& devices, 
 
 BOOL SettingsWindow::PreTranslateMessage(MSG* message)
 {
+    if (licenses_.PreTranslateMessage(message)) { return TRUE; }
     if (!IsWindow() || (message->hwnd != m_hWnd && !::IsChild(m_hWnd, message->hwnd))) { return FALSE; }
     return ::IsDialogMessageW(m_hWnd, message);
 }
@@ -40,9 +42,14 @@ LRESULT SettingsWindow::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
     tab_ = CreateWindowExW(0, L"BUTTON", L"Display", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(DisplayTabId)),
         _Module.GetModuleInstance(), nullptr);
+    about_tab_ = CreateWindowExW(0, L"BUTTON", L"About", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(AboutTabId)),
+        _Module.GetModuleInstance(), nullptr);
     RECT empty{};
-    if (tab_ == nullptr || !display_.CreatePage(m_hWnd, empty, configured_devices_, save_)) { return -1; }
+    if (tab_ == nullptr || about_tab_ == nullptr || !display_.CreatePage(m_hWnd, empty, configured_devices_, save_)
+        || !about_.CreatePage(m_hWnd, empty)) { return -1; }
     display_.SetDlgCtrlID(DisplayId);
+    about_.SetDlgCtrlID(AboutId);
     loop_ = _Module.GetMessageLoop();
     if (loop_ != nullptr) { loop_->AddMessageFilter(this); }
     Layout();
@@ -63,8 +70,14 @@ void SettingsWindow::Layout()
     const int header = MulDiv(56, dpi, 96);
     ::SetWindowPos(tab_, nullptr, MulDiv(20, dpi, 96), MulDiv(10, dpi, 96),
         MulDiv(112, dpi, 96), MulDiv(38, dpi, 96), SWP_NOZORDER | SWP_NOACTIVATE);
+    ::SetWindowPos(about_tab_, nullptr, MulDiv(140, dpi, 96), MulDiv(10, dpi, 96),
+        MulDiv(112, dpi, 96), MulDiv(38, dpi, 96), SWP_NOZORDER | SWP_NOACTIVATE);
     if (display_.IsWindow()) {
         display_.SetWindowPos(nullptr, 0, header, client.right, (std::max<int>)(1, client.bottom - header),
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (about_.IsWindow()) {
+        about_.SetWindowPos(nullptr, 0, header, client.right, (std::max<int>)(1, client.bottom - header),
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
     Invalidate(FALSE);
@@ -126,20 +139,23 @@ LRESULT SettingsWindow::OnPrint(UINT, WPARAM dc, LPARAM, BOOL&) { PaintHeader(re
 LRESULT SettingsWindow::OnDrawItem(UINT, WPARAM, LPARAM parameter, BOOL& handled)
 {
     const auto draw = reinterpret_cast<DRAWITEMSTRUCT*>(parameter);
-    if (draw->CtlID != DisplayTabId) { handled = FALSE; return 0; }
-    SetDCBrushColor(draw->hDC, RGB(42, 42, 42));
+    if (draw->CtlID != DisplayTabId && draw->CtlID != AboutTabId) { handled = FALSE; return 0; }
+    const bool selected = showing_about_ == (draw->CtlID == AboutTabId);
+    SetDCBrushColor(draw->hDC, selected ? RGB(42, 42, 42) : RGB(32, 32, 32));
     FillRect(draw->hDC, &draw->rcItem, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
     SetBkMode(draw->hDC, TRANSPARENT);
     SetTextColor(draw->hDC, RGB(245, 245, 245));
     const HGDIOBJ font = SelectObject(draw->hDC,
         tab_font_ != nullptr ? tab_font_ : GetStockObject(DEFAULT_GUI_FONT));
     RECT text = draw->rcItem;
-    DrawTextW(draw->hDC, L"Display", -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(draw->hDC, draw->CtlID == DisplayTabId ? L"Display" : L"About", -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(draw->hDC, font);
-    RECT accent = draw->rcItem;
-    accent.top = accent.bottom - MulDiv(3, DisplayWindowDpi(m_hWnd), 96);
-    SetDCBrushColor(draw->hDC, RGB(0, 120, 212));
-    FillRect(draw->hDC, &accent, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    if (selected) {
+        RECT accent = draw->rcItem;
+        accent.top = accent.bottom - MulDiv(3, DisplayWindowDpi(m_hWnd), 96);
+        SetDCBrushColor(draw->hDC, RGB(0, 120, 212));
+        FillRect(draw->hDC, &accent, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    }
     if (draw->itemState & ODS_FOCUS) {
         RECT focus = draw->rcItem;
         InflateRect(&focus, -4, -4);
@@ -148,9 +164,14 @@ LRESULT SettingsWindow::OnDrawItem(UINT, WPARAM, LPARAM parameter, BOOL& handled
     return TRUE;
 }
 
-LRESULT SettingsWindow::OnTab(WORD, WORD, HWND, BOOL&)
+LRESULT SettingsWindow::OnTab(WORD, WORD id, HWND, BOOL&)
 {
-    ::SetFocus(display_.GetDlgItem(DisplayPage::TopologyId));
+    showing_about_ = id == AboutTabId;
+    display_.ShowWindow(showing_about_ ? SW_HIDE : SW_SHOW);
+    about_.ShowWindow(showing_about_ ? SW_SHOW : SW_HIDE);
+    ::InvalidateRect(tab_, nullptr, FALSE);
+    ::InvalidateRect(about_tab_, nullptr, FALSE);
+    ::SetFocus(showing_about_ ? about_.GetDlgItem(AboutPage::GitHubId) : display_.GetDlgItem(DisplayPage::TopologyId));
     return 0;
 }
 
@@ -162,6 +183,7 @@ LRESULT SettingsWindow::OnClose(UINT, WPARAM, LPARAM, BOOL&)
 
 LRESULT SettingsWindow::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled)
 {
+    if (licenses_.IsWindow()) { licenses_.DestroyWindow(); }
     if (loop_ != nullptr) { loop_->RemoveMessageFilter(this); loop_ = nullptr; }
     if (tab_font_ != nullptr) { DeleteObject(tab_font_); tab_font_ = nullptr; }
     // Settings owns only its UI; the tray host owns the application lifetime.

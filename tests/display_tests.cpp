@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <shellapi.h>
 
 WTL::CAppModule _Module;
 
@@ -14,6 +16,28 @@ MonitorSnapshot fixture;
 DWORD query_error = ERROR_SUCCESS;
 int query_count = 0;
 bool use_real = false;
+std::wstring opened_url;
+bool browser_fails = false;
+int browser_errors = 0;
+UINT ui_dpi = 0;
+bool control_pressed = false;
+
+HINSTANCE WINAPI OpenUrl(HWND, LPCWSTR operation, LPCWSTR url, LPCWSTR, LPCWSTR, INT)
+{
+    opened_url = url;
+    if (std::wcscmp(operation, L"open") != 0) { std::abort(); }
+    return reinterpret_cast<HINSTANCE>(static_cast<INT_PTR>(browser_fails ? 2 : 33));
+}
+
+int WINAPI LinkError(HWND, LPCWSTR text, LPCWSTR title, UINT)
+{
+    if (std::wcscmp(title, L"MinimizeWindows") != 0 || std::wcsstr(text, L"Unable to open") == nullptr) { std::abort(); }
+    ++browser_errors;
+    return IDOK;
+}
+
+UINT UiDpi(HWND window) { return ui_dpi != 0 ? ui_dpi : DisplayWindowDpi(window); }
+SHORT WINAPI UiKeyState(int key) { return key == VK_CONTROL && control_pressed ? static_cast<SHORT>(0x8000) : 0; }
 
 void Check(bool condition, const char* message)
 {
@@ -208,6 +232,165 @@ public:
 #define MonitorEnumerator FixtureMonitorEnumerator
 #include "../src/display_page.cpp"
 #undef MonitorEnumerator
+
+#define ShellExecuteW display_test::OpenUrl
+#define MessageBoxW display_test::LinkError
+#define DisplayWindowDpi display_test::UiDpi
+#define GetKeyState display_test::UiKeyState
+#include "../src/licenses_dialog.cpp"
+#include "../src/about_page.cpp"
+#undef DisplayWindowDpi
+#undef GetKeyState
+#undef MessageBoxW
+#undef ShellExecuteW
+
+namespace display_test {
+
+std::wstring WindowText(HWND window)
+{
+    std::wstring text(GetWindowTextLengthW(window) + 1, L'\0');
+    const int length = GetWindowTextW(window, &text[0], static_cast<int>(text.size()));
+    text.resize(length);
+    return text;
+}
+
+std::wstring CheckLicenseResource(UINT id, const wchar_t* path)
+{
+    const HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    Check(file != INVALID_HANDLE_VALUE, "open original license for comparison");
+    const DWORD size = GetFileSize(file, nullptr);
+    std::string original(size, '\0');
+    DWORD read = 0;
+    Check(ReadFile(file, &original[0], size, &read, nullptr) && read == size, "read original license");
+    CloseHandle(file);
+    const HRSRC resource = FindResourceW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(id), RT_RCDATA);
+    Check(resource != nullptr && SizeofResource(GetModuleHandleW(nullptr), resource) == size,
+        "embedded license has original byte length");
+    const void* embedded = LockResource(LoadResource(GetModuleHandleW(nullptr), resource));
+    Check(embedded != nullptr && std::memcmp(embedded, original.data(), size) == 0,
+        "embedded license preserves original bytes");
+    const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, original.data(), size, nullptr, 0);
+    std::wstring decoded(length, L'\0');
+    Check(length != 0 && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, original.data(), size, &decoded[0], length),
+        "decode expected license");
+    std::wstring expected;
+    for (size_t i = 0; i < decoded.size(); ++i) {
+        if (decoded[i] == L'\n' && (i == 0 || decoded[i - 1] != L'\r')) { expected += L'\r'; }
+        expected += decoded[i];
+    }
+    return expected;
+}
+
+void ClickButton(HWND parent, UINT id)
+{
+    SendMessageW(parent, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(parent, id)));
+}
+
+HWND AboutTests(SettingsWindow& frame, HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save)
+{
+    const std::wstring app_license = CheckLicenseResource(IDR_APP_LICENSE, L"LICENSE");
+    const std::wstring wtl_license = CheckLicenseResource(IDR_WTL_LICENSE, L"third_party\\wtl\\MS-PL.txt");
+    const std::wstring json_license = CheckLicenseResource(IDR_JSON_LICENSE, L"third_party\\nlohmann\\LICENSE.MIT");
+    const HWND display = GetDlgItem(frame, SettingsWindow::DisplayId);
+    HWND about = GetDlgItem(frame, SettingsWindow::AboutId);
+    Check(about != nullptr && !IsWindowVisible(about) && IsWindowVisible(display), "Display is the initial visible page");
+    ClickButton(frame, SettingsWindow::AboutTabId);
+    Check(IsWindowVisible(about) && !IsWindowVisible(display) && GetFocus() == GetDlgItem(about, AboutPage::GitHubId),
+        "About tab hides Display and moves keyboard focus");
+    Check(frame.Show(icon, devices, save) && IsWindowVisible(about), "re-activation retains About tab");
+    SaveClient(frame, L"build\\tests\\about-minimum.bmp");
+    ClickButton(about, AboutPage::GitHubId);
+    Check(opened_url == L"https://github.com/LINKlang/MinimizeWindows", "GitHub button opens our repository");
+    browser_fails = true;
+    ClickButton(about, AboutPage::OriginalProjectId);
+    Check(opened_url == L"https://github.com/deadem/minimize-windows" && browser_errors == 1,
+        "original project button reports browser failure");
+    browser_fails = false;
+
+    // Production loading remains independent of the executable's current directory.
+    wchar_t original_directory[MAX_PATH];
+    Check(GetCurrentDirectoryW(ARRAYSIZE(original_directory), original_directory) != 0 && SetCurrentDirectoryW(L"build\\tests"),
+        "change working directory away from source license files");
+    ClickButton(about, AboutPage::LicenseId);
+    Check(SetCurrentDirectoryW(original_directory), "restore working directory");
+    HWND dialog = FindWindowW(L"#32770", L"MinimizeWindows License");
+    Check(dialog != nullptr && GetWindow(dialog, GW_OWNER) == frame && IsWindowEnabled(frame),
+        "app license is a non-modal dialog owned by Settings");
+    const HWND license_text = GetDlgItem(dialog, LicensesDialog::TextId);
+    Check(WindowText(license_text) == app_license && (GetWindowLongW(license_text, GWL_STYLE) & ES_READONLY) != 0,
+        "app license text is complete and read-only");
+    MSG select_all{};
+    select_all.hwnd = license_text;
+    select_all.message = WM_KEYDOWN;
+    select_all.wParam = 'A';
+    control_pressed = true;
+    Check(frame.PreTranslateMessage(&select_all), "Ctrl+A selects license text for copying");
+    control_pressed = false;
+    DWORD selection_start = 0, selection_end = 0;
+    SendMessageW(license_text, EM_GETSEL, reinterpret_cast<WPARAM>(&selection_start), reinterpret_cast<LPARAM>(&selection_end));
+    Check(selection_start == 0 && selection_end == app_license.size(), "all license text can be selected");
+    ClickButton(about, AboutPage::LicenseId);
+    Check(FindWindowW(L"#32770", L"MinimizeWindows License") == dialog, "repeated license opening reuses dialog");
+    ClickButton(dialog, LicensesDialog::HomepageId);
+    Check(opened_url == L"https://github.com/LINKlang/MinimizeWindows", "app license homepage opens our repository");
+    ClickButton(about, AboutPage::ThirdPartyId);
+    Check(FindWindowW(L"#32770", L"Third-party software licenses") == dialog
+        && WindowText(license_text) == wtl_license, "third-party entry reuses viewer and defaults to WTL");
+    Check(WindowText(GetDlgItem(dialog, LicensesDialog::MetadataId)).find(L"Microsoft Corporation, WTL Team") != std::wstring::npos,
+        "WTL original attribution is displayed");
+    ClickButton(dialog, LicensesDialog::HomepageId);
+    Check(opened_url == L"https://sourceforge.net/projects/wtl/", "WTL homepage opens upstream");
+    SaveClient(dialog, L"build\\tests\\licenses-wtl.bmp");
+    SendMessageW(GetDlgItem(dialog, LicensesDialog::ComponentId), CB_SETCURSEL, 1, 0);
+    SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(LicensesDialog::ComponentId, CBN_SELCHANGE),
+        reinterpret_cast<LPARAM>(GetDlgItem(dialog, LicensesDialog::ComponentId)));
+    Check(WindowText(license_text) == json_license, "json selection loads its exact complete MIT text");
+    const std::wstring metadata = WindowText(GetDlgItem(dialog, LicensesDialog::MetadataId));
+    Check(metadata.find(L"3.12.0") != std::wstring::npos && metadata.find(L"Niels Lohmann") != std::wstring::npos
+        && metadata.find(L"Evan Nemerson") != std::wstring::npos && metadata.find(L"Abseil Authors") != std::wstring::npos
+        && metadata.find(L"Hoehrmann") != std::wstring::npos && metadata.find(L"Florian Loitsch") != std::wstring::npos,
+        "json version and bundled attribution notices are retained");
+    ClickButton(dialog, LicensesDialog::HomepageId);
+    Check(opened_url == L"https://github.com/nlohmann/json", "json homepage opens upstream");
+    SaveClient(dialog, L"build\\tests\\licenses-json.bmp");
+    ClickButton(frame, SettingsWindow::DisplayTabId);
+    Check(IsWindow(dialog) && IsWindowVisible(display) && IsWindowEnabled(GetDlgItem(display, DisplayPage::SaveId)),
+        "switching tabs keeps license window and Display draft");
+    MSG tab{};
+    tab.hwnd = GetDlgItem(dialog, LicensesDialog::ComponentId);
+    tab.message = WM_KEYDOWN;
+    tab.wParam = VK_TAB;
+    SetFocus(tab.hwnd);
+    Check(frame.PreTranslateMessage(&tab) && GetFocus() == GetDlgItem(dialog, LicensesDialog::MetadataId),
+        "message filter routes keyboard navigation to owned license dialog");
+    MSG escape{};
+    escape.hwnd = license_text;
+    escape.message = WM_KEYDOWN;
+    escape.wParam = VK_ESCAPE;
+    Check(frame.PreTranslateMessage(&escape) && !IsWindow(dialog), "Escape destroys modeless dialog");
+    Pump();
+
+    ClickButton(frame, SettingsWindow::AboutTabId);
+    ClickButton(about, AboutPage::ThirdPartyId);
+    dialog = FindWindowW(L"#32770", L"Third-party software licenses");
+    Check(dialog != nullptr && WindowText(GetDlgItem(dialog, LicensesDialog::TextId)) == wtl_license,
+        "closed license viewer can reopen");
+    SendMessageW(dialog, WM_SYSCOMMAND, SC_CLOSE, 0);
+    Check(!IsWindow(dialog), "Alt+F4 closes license viewer without ending application");
+    Pump();
+    ui_dpi = 144;
+    about = GetDlgItem(frame, SettingsWindow::AboutId);
+    SetWindowPos(about, nullptr, 0, 0, 960, 696, SWP_NOZORDER | SWP_NOACTIVATE);
+    SaveClient(about, L"build\\tests\\about-150-percent.bmp");
+    ClickButton(about, AboutPage::ThirdPartyId);
+    dialog = FindWindowW(L"#32770", L"Third-party software licenses");
+    Check(dialog != nullptr && Bounds(dialog).right == 1080, "license layout scales to 150 percent");
+    SaveClient(dialog, L"build\\tests\\licenses-150-percent.bmp");
+    ui_dpi = 0;
+    return dialog;
+}
+
+} // namespace display_test
 
 int main()
 {
@@ -434,9 +617,13 @@ int main()
     SendMessageW(GetDlgItem(integrated, DisplayPage::ListId), WM_KEYDOWN, VK_SPACE, 0);
     Check(frame.Show(icon, saved_devices, save)
         && IsWindowEnabled(GetDlgItem(integrated, DisplayPage::SaveId)), "re-activation retains an existing edit session");
+    const HWND license_window = AboutTests(frame, icon, saved_devices, save);
     frame.DestroyWindow();
+    Check(!IsWindow(license_window), "closing Settings destroys its owned license viewer");
     Pump();
     Check(frame.Show(icon, saved_devices, save), "closed settings can reopen with Display controls");
+    Check(IsWindowVisible(GetDlgItem(frame, SettingsWindow::DisplayId))
+        && !IsWindowVisible(GetDlgItem(frame, SettingsWindow::AboutId)), "reopened Settings defaults to Display");
     Check(saves == before_close_saves && !IsWindowEnabled(GetDlgItem(GetDlgItem(frame, SettingsWindow::DisplayId), DisplayPage::SaveId)),
         "closing discards unsaved edits and reopening returns to view mode");
     frame.DestroyWindow();

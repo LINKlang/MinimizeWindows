@@ -1,0 +1,6 @@
+#pragma once
+
+#define IDD_LICENSES 300
+#define IDR_APP_LICENSE 301
+#define IDR_WTL_LICENSE 302
+#define IDR_JSON_LICENSE 303

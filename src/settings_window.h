@@ -2,12 +2,14 @@
 
 #include "wtl_support.h"
 #include "display_page.h"
+#include "about_page.h"
 
 class SettingsWindow : public WTL::CFrameWindowImpl<SettingsWindow>, public WTL::CMessageFilter {
 public:
     DECLARE_FRAME_WND_CLASS_EX(L"MinimizeWindows.Settings", 0, 0, COLOR_WINDOW)
 
-    static constexpr UINT DisplayId = 200, DisplayTabId = 199;
+    static constexpr UINT DisplayId = 200, DisplayTabId = 199, AboutId = 210, AboutTabId = 198;
+    SettingsWindow() : about_(licenses_) { }
     bool Show(HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save);
     BOOL PreTranslateMessage(MSG* message) override;
 
@@ -22,6 +24,7 @@ public:
         MESSAGE_HANDLER(WM_ERASEBKGND, OnErase)
         MESSAGE_HANDLER(WM_DRAWITEM, OnDrawItem)
         COMMAND_HANDLER(DisplayTabId, BN_CLICKED, OnTab)
+        COMMAND_HANDLER(AboutTabId, BN_CLICKED, OnTab)
         MESSAGE_HANDLER(WM_CLOSE, OnClose)
         MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
         CHAIN_MSG_MAP(WTL::CFrameWindowImpl<SettingsWindow>)
@@ -45,7 +48,10 @@ private:
     std::vector<std::wstring> configured_devices_;
     SaveMonitorSelection save_;
     DisplayPage display_;
-    HWND tab_ = nullptr;
+    LicensesDialog licenses_;
+    AboutPage about_;
+    HWND tab_ = nullptr, about_tab_ = nullptr;
+    bool showing_about_ = false;
     HFONT tab_font_ = nullptr;
     UINT tab_dpi_ = 0;
     WTL::CMessageLoop* loop_ = nullptr;

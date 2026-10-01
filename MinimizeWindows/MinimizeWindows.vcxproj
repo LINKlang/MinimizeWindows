@@ -97,6 +97,8 @@
     <ClCompile Include="..\src\display_model.cpp" />
     <ClCompile Include="..\src\display_page.cpp" />
     <ClCompile Include="..\src\config_store.cpp" />
+    <ClCompile Include="..\src\about_page.cpp" />
+    <ClCompile Include="..\src\licenses_dialog.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\keyboard_hook.h" />
@@ -108,6 +110,14 @@
     <ClInclude Include="..\src\display_model.h" />
     <ClInclude Include="..\src\display_page.h" />
     <ClInclude Include="..\src\config_store.h" />
+    <ClInclude Include="..\src\about_page.h" />
+    <ClInclude Include="..\src\licenses_dialog.h" />
+    <ClInclude Include="..\src\resources.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\src\resources.rc">
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
