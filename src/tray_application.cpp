@@ -136,12 +136,16 @@ private:
         }
     }
 
-    LRESULT OnTrayCallback(UINT, WPARAM, LPARAM notification, BOOL&)
+    LRESULT OnTrayCallback(UINT, WPARAM icon_or_position, LPARAM notification, BOOL&)
     {
-        if (closing_ || HIWORD(notification) != TrayIconId) { return 0; }
+        if (closing_) { return 0; }
+        // Explorer sends V4 events; some docks forward pre-V4 (ID, event) messages.
+        // Only fall back when there is no packed icon ID; reject other nonzero V4 IDs.
+        const bool legacy = HIWORD(notification) == 0;
+        if (legacy ? icon_or_position != TrayIconId : HIWORD(notification) != TrayIconId) { return 0; }
         const UINT event = LOWORD(notification);
         if (event == WM_LBUTTONDBLCLK || event == NIN_KEYSELECT) { ShowSettings(); }
-        else if (event == WM_CONTEXTMENU) { ShowMenu(); }
+        else if (event == WM_CONTEXTMENU || (legacy && event == WM_RBUTTONUP)) { ShowMenu(); }
         return 0;
     }
 

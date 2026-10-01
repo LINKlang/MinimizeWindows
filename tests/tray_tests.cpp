@@ -125,6 +125,11 @@ void TrayEvent(UINT event, UINT icon = 1)
     SendMessageW(notification.hWnd, notification.uCallbackMessage, MAKELPARAM(50, 50), MAKELPARAM(event, icon));
 }
 
+void LegacyTrayEvent(UINT event, UINT icon = 1)
+{
+    SendMessageW(notification.hWnd, notification.uCallbackMessage, icon, event);
+}
+
 } // namespace tray_test
 
 #define SetWinEventHook tray_test::Track
@@ -176,6 +181,12 @@ int main()
         Check(Settings() == nullptr && adds == 1 && versions == 1, "startup does not create a settings frame");
         TrayEvent(WM_LBUTTONDBLCLK, 99);
         Check(Settings() == nullptr, "version-4 callback rejects another icon ID");
+        LegacyTrayEvent(WM_LBUTTONDBLCLK, 99);
+        Check(Settings() == nullptr, "legacy callback rejects another icon ID");
+        SendMessageW(notification.hWnd, notification.uCallbackMessage, 1, MAKELPARAM(WM_LBUTTONDBLCLK, 99));
+        Check(Settings() == nullptr, "wrong V4 icon is not accepted as a legacy event with matching wParam");
+        LegacyTrayEvent(WM_LBUTTONUP);
+        Check(Settings() == nullptr, "legacy single-click retains the double-click activation behavior");
         TrayEvent(NIN_SELECT);
         Check(Settings() == nullptr, "single mouse selection does not open settings");
         TrayEvent(WM_LBUTTONDBLCLK);
@@ -196,8 +207,14 @@ int main()
         Pump();
         Check(Settings() == nullptr && IsWindow(notification.hWnd) && keyboard_removals == 0,
             "frame close leaves tray and core alive");
-        TrayEvent(WM_LBUTTONDBLCLK);
-        Check(Settings() != nullptr, "closed frame can be created again");
+        LegacyTrayEvent(WM_LBUTTONDBLCLK);
+        const HWND legacy_window = Settings();
+        Check(legacy_window != nullptr, "legacy double-click reopens settings after close");
+        LegacyTrayEvent(WM_LBUTTONDBLCLK);
+        Check(Settings() == legacy_window, "legacy repeat double-click reuses the frame");
+        ShowWindow(legacy_window, SW_MINIMIZE);
+        LegacyTrayEvent(WM_LBUTTONDBLCLK);
+        Check(!IsIconic(legacy_window), "legacy double-click restores a minimized frame");
         SendMessageW(Settings(), WM_SYSCOMMAND, SC_CLOSE, 0); // Alt+F4's standard close command.
         Stage("Tray lifecycle: closed second frame");
         Pump();
@@ -233,6 +250,19 @@ int main()
         TrayEvent(WM_CONTEXTMENU);
         Check(menu_calls == 3, "failed cursor query does not open a menu at a fabricated position");
         fail_cursor = false;
+        cursor_position = {320, 240};
+        LegacyTrayEvent(WM_CONTEXTMENU);
+        Check(menu_calls == 4 && menu_position.x == 320 && menu_position.y == 240,
+            "legacy context event opens the menu at the cursor, not at the icon ID");
+        cursor_position = {-800, -100};
+        LegacyTrayEvent(WM_RBUTTONUP);
+        Check(menu_calls == 5 && menu_position.x == -800 && menu_position.y == -100,
+            "legacy right-button release opens the menu and preserves negative coordinates");
+        TrayEvent(WM_RBUTTONUP);
+        LegacyTrayEvent(WM_CONTEXTMENU, 99);
+        LegacyTrayEvent(WM_RBUTTONUP, 99);
+        SendMessageW(notification.hWnd, notification.uCallbackMessage, 1, MAKELPARAM(WM_CONTEXTMENU, 99));
+        Check(menu_calls == 5, "wrong icon IDs and V4 right-button release do not open extra menus");
         DestroyWindow(core_window);
         app.Shutdown();
         Check(!IsWindow(notification.hWnd) && deletes == 1 && keyboard_removals == 1,
@@ -258,20 +288,23 @@ int main()
         Pump();
     }
 
-    Reset();
-    {
-        Stage("Tray lifecycle: Exit menu loop");
-        TrayApplication app(target, loop);
-        Check(app.Initialize(), "initialize for tray Exit test");
-        TrayEvent(WM_LBUTTONDBLCLK);
-        menu_action = MenuAction::Exit;
-        Check(PostMessageW(notification.hWnd, notification.uCallbackMessage, 0, MAKELPARAM(WM_CONTEXTMENU, 1)) != FALSE,
-            "post Exit-menu request to the tray host");
-        Check(app.Run() == 0 && Settings() == nullptr && !IsWindow(notification.hWnd)
-            && deletes == 1 && keyboard_removals == 1, "tray Exit closes frame, stops core and exits loop");
+    for (const bool legacy : {false, true}) {
+        Reset();
+        {
+            Stage("Tray lifecycle: Exit menu loop");
+            TrayApplication app(target, loop);
+            Check(app.Initialize(), "initialize for tray Exit test");
+            TrayEvent(WM_LBUTTONDBLCLK);
+            menu_action = MenuAction::Exit;
+            Check(PostMessageW(notification.hWnd, notification.uCallbackMessage, legacy ? 1 : 0,
+                legacy ? static_cast<LPARAM>(WM_RBUTTONUP) : MAKELPARAM(WM_CONTEXTMENU, 1)) != FALSE,
+                "post Exit-menu request to the tray host");
+            Check(app.Run() == 0 && Settings() == nullptr && !IsWindow(notification.hWnd)
+                && deletes == 1 && keyboard_removals == 1, "tray Exit closes frame, stops core and exits loop");
+        }
+        Check(tracking_removals == 1, "tray Exit releases restore tracking");
+        Pump();
     }
-    Check(tracking_removals == 1, "tray Exit releases restore tracking");
-    Pump();
     Reset();
     {
         Stage("Tray lifecycle: external quit loop");
