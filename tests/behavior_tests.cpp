@@ -32,6 +32,11 @@ struct Window {
     DWORD cloaked = 0;
     HRESULT dwm_result = S_OK;
     bool fail_show = false;
+    bool ignore_minimize = false;
+    bool defer_minimize = false;
+    bool fail_restore = false;
+    DWORD process_id = 100;
+    DWORD thread_id = 200;
     HMONITOR monitor = nullptr;
 };
 
@@ -53,6 +58,45 @@ void (*before_second_enum)() = nullptr;
 void (*after_first_enum)() = nullptr;
 bool fail_monitor_enum = false;
 int monitor_enum_calls = 0;
+WINEVENTPROC window_event_proc = nullptr;
+HWINEVENTHOOK window_event_hook = nullptr;
+bool fail_tracking = false;
+DWORD tracking_error = ERROR_ACCESS_DENIED;
+int tracking_installs = 0;
+int tracking_uninstalls = 0;
+DWORD current_thread = 42;
+void (*during_show)(HWND, int) = nullptr;
+void (*during_identity)(HWND) = nullptr;
+
+void RestoreEvent(HWND hwnd, DWORD event = EVENT_SYSTEM_MINIMIZEEND,
+    LONG object = OBJID_WINDOW, LONG child = CHILDID_SELF)
+{
+    if (window_event_proc != nullptr) {
+        window_event_proc(window_event_hook, event, hwnd, object, child, 200, 0);
+    }
+}
+
+HWINEVENTHOOK WINAPI SetWinEventHook(DWORD first, DWORD last, HMODULE module,
+    WINEVENTPROC callback, DWORD process, DWORD thread, DWORD flags)
+{
+    Check(first == EVENT_SYSTEM_MINIMIZEEND && last == first && module == nullptr
+        && process == 0 && thread == 0 && flags == WINEVENT_OUTOFCONTEXT,
+        "track only minimize-end on the current desktop without injection");
+    ++tracking_installs;
+    if (fail_tracking) { SetLastError(tracking_error); return nullptr; }
+    window_event_proc = callback;
+    window_event_hook = reinterpret_cast<HWINEVENTHOOK>(static_cast<ULONG_PTR>(tracking_installs + 10));
+    return window_event_hook;
+}
+
+BOOL WINAPI UnhookWinEvent(HWINEVENTHOOK hook)
+{
+    Check(hook == window_event_hook, "unhook the owned restore event hook");
+    ++tracking_uninstalls;
+    window_event_hook = nullptr;
+    window_event_proc = nullptr;
+    return TRUE;
+}
 
 HMONITOR AddMonitor(const wchar_t* device_name, RECT bounds)
 {
@@ -89,6 +133,13 @@ BOOL WINAPI IsWindow(HWND hwnd)
 
 BOOL WINAPI IsWindowVisible(HWND hwnd) { return GetWindow(hwnd).visible; }
 BOOL WINAPI IsIconic(HWND hwnd) { return GetWindow(hwnd).minimized; }
+DWORD WINAPI GetWindowThreadProcessId(HWND hwnd, LPDWORD process)
+{
+    if (during_identity != nullptr) { during_identity(hwnd); }
+    if (!test::IsWindow(hwnd)) { *process = 0; return 0; }
+    *process = GetWindow(hwnd).process_id;
+    return GetWindow(hwnd).thread_id;
+}
 HWND WINAPI GetDesktopWindow() { return desktop; }
 HWND WINAPI GetShellWindow() { return shell; }
 
@@ -176,7 +227,15 @@ BOOL WINAPI ShowWindowAsync(HWND hwnd, int command)
     if (!window.alive || window.fail_show) {
         return FALSE;
     }
-    window.minimized = command == SW_MINIMIZE;
+    if (command == SW_RESTORE && window.fail_restore) { return FALSE; }
+    if (command == SW_MINIMIZE) {
+        if (!window.ignore_minimize && !window.defer_minimize) { window.minimized = true; }
+    }
+    else {
+        window.minimized = false;
+        RestoreEvent(hwnd);
+    }
+    if (during_show != nullptr) { during_show(hwnd, command); }
     return TRUE;
 }
 
@@ -195,6 +254,8 @@ void ResetWindows()
     after_first_enum = nullptr;
     fail_monitor_enum = false;
     monitor_enum_calls = 0;
+    during_show = nullptr;
+    during_identity = nullptr;
 }
 
 std::array<SHORT, 256> keys{};
@@ -222,7 +283,7 @@ HHOOK WINAPI SetWindowsHookExW(int kind, HOOKPROC proc, HINSTANCE module, DWORD 
 
 BOOL WINAPI UnhookWindowsHookEx(HHOOK) { ++uninstall_calls; return TRUE; }
 BOOL WINAPI PeekMessageW(LPMSG, HWND, UINT, UINT, UINT) { return FALSE; }
-DWORD WINAPI GetCurrentThreadId() { return 42; }
+DWORD WINAPI GetCurrentThreadId() { return current_thread; }
 SHORT WINAPI GetAsyncKeyState(int key) { return keys[key]; }
 LRESULT WINAPI CallNextHookEx(HHOOK, int, WPARAM, LPARAM) { return PassedThrough; }
 
@@ -276,6 +337,10 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #define EnumDisplayMonitors test::EnumDisplayMonitors
 #define GetMonitorInfoW test::GetMonitorInfoW
 #define MonitorFromWindow test::MonitorFromWindow
+#define GetWindowThreadProcessId test::GetWindowThreadProcessId
+#define GetCurrentThreadId test::GetCurrentThreadId
+#define SetWinEventHook test::SetWinEventHook
+#define UnhookWinEvent test::UnhookWinEvent
 #include "../src/desktop_manager.cpp"
 #undef IsWindow
 #undef IsWindowVisible
@@ -290,6 +355,10 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #undef EnumDisplayMonitors
 #undef GetMonitorInfoW
 #undef MonitorFromWindow
+#undef GetWindowThreadProcessId
+#undef GetCurrentThreadId
+#undef SetWinEventHook
+#undef UnhookWinEvent
 
 #define SetWindowsHookExW test::SetWindowsHookExW
 #define UnhookWindowsHookEx test::UnhookWindowsHookEx
@@ -309,151 +378,332 @@ void Hold(int key) { keys[key] = static_cast<SHORT>(0x8000); }
 #undef PostThreadMessageW
 #undef SendInput
 
+struct DesktopFixture {
+    DesktopManager manager;
+    MonitorTarget primary{L"\\\\.\\DISPLAY1"};
+    MonitorTarget secondary{L"\\\\.\\display2"};
+    DesktopFixture()
+    {
+        test::ResetWindows();
+        test::Check(manager.StartTracking(), "start restore tracking for fixture");
+    }
+    void Toggle() { manager.ToggleDesktop(primary); }
+};
+
+void TestTracking()
+{
+    using namespace test;
+    ResetWindows();
+    const HWND window = AddWindow();
+    const int before = tracking_uninstalls;
+    WINEVENTPROC saved_callback = nullptr;
+    HWINEVENTHOOK saved_hook = nullptr;
+    {
+        DesktopManager manager;
+        manager.ToggleDesktop({L"\\\\.\\DISPLAY1"});
+        Check(commands.empty(), "no operation before tracking is initialized");
+        fail_tracking = true;
+        Check(!manager.StartTracking() && GetLastError() == ERROR_ACCESS_DENIED,
+            "tracking initialization failure preserves API error");
+        tracking_error = 0;
+        Check(!manager.StartTracking() && GetLastError() == ERROR_GEN_FAILURE,
+            "tracking failure without API error gets a useful error");
+        fail_tracking = false;
+        tracking_error = ERROR_ACCESS_DENIED;
+        Check(manager.StartTracking(), "tracking can retry after failure");
+        const int installed = tracking_installs;
+        Check(manager.StartTracking() && installed == tracking_installs, "tracking initialization is idempotent");
+        DesktopManager second;
+        Check(!second.StartTracking() && GetLastError() == ERROR_ALREADY_EXISTS, "reject another active tracker");
+        current_thread = 43;
+        Check(!manager.StartTracking() && GetLastError() == ERROR_INVALID_THREAD_ID, "enforce tracking thread");
+        manager.ToggleDesktop({L"\\\\.\\DISPLAY1"});
+        Check(commands.empty(), "wrong-thread toggle performs no operation");
+        current_thread = 42;
+        saved_callback = window_event_proc;
+        saved_hook = window_event_hook;
+    }
+    Check(tracking_uninstalls == before + 1 && window_event_proc == nullptr, "destructor releases restore hook");
+    saved_callback(saved_hook, EVENT_SYSTEM_MINIMIZEEND, window, OBJID_WINDOW, CHILDID_SELF, 200, 0);
+    Check(commands.empty(), "late callback after destruction is harmless");
+}
+
 void TestDesktop()
 {
     using namespace test;
-    DesktopManager manager;
-    const MonitorTarget target{L"\\\\.\\DISPLAY1"};
-    const MonitorTarget second{L"\\\\.\\display2"};
-    ResetWindows();
-    const HWND chrome = AddWindow();
-    const HWND code = AddWindow();
-    const HWND foreign = AddWindow(MonitorAt(1));
-    const HWND foreign_manual = AddWindow(MonitorAt(1));
-    GetWindow(foreign_manual).minimized = true;
-    manager.ToggleDesktop(target);
-    Check(GetWindow(chrome).minimized && GetWindow(code).minimized,
-        "all target ordinary windows minimized");
-    Check(!GetWindow(foreign).minimized && GetWindow(foreign_manual).minimized,
-        "other monitor remains unchanged during minimize");
-    const HWND notepad = AddWindow();
-    commands.clear();
-    manager.ToggleDesktop(target);
-    Check(commands.size() == 1 && commands[0].first == notepad
-        && commands[0].second == SW_MINIMIZE, "new window causes another minimize");
-    manager.ToggleDesktop(target);
-    Check(!GetWindow(chrome).minimized && !GetWindow(code).minimized
-        && !GetWindow(notepad).minimized, "foreign visible window does not stop target restoration");
-    Check(GetWindow(foreign_manual).minimized, "restoration leaves other monitor's minimized windows alone");
-    commands.clear();
-    manager.ToggleDesktop(second);
-    Check(commands.size() == 1 && commands[0].first == foreign && GetWindow(foreign_manual).minimized,
-        "case-insensitive target selects a non-primary monitor");
-    commands.clear();
-    manager.ToggleDesktop(second);
-    Check(commands.size() == 2 && !GetWindow(foreign).minimized && !GetWindow(foreign_manual).minimized,
-        "second monitor restores all its minimized windows regardless of first monitor");
-
-    ResetWindows();
-    const HWND manual = AddWindow();
-    GetWindow(manual).minimized = true;
-    DesktopManager fresh_manager;
-    fresh_manager.ToggleDesktop(target);
-    Check(!GetWindow(manual).minimized && commands[0].second == SW_RESTORE,
-        "fresh manager restores manually minimized window without history");
-
-    ResetWindows();
-    desktop = AddWindow();
-    shell = AddWindow();
-    for (const wchar_t* name : {L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd"}) {
-        GetWindow(AddWindow()).class_name = name;
+    TestTracking();
+    {
+        DesktopFixture fixture;
+        const HWND chrome = AddWindow();
+        const HWND code = AddWindow();
+        const HWND manual = AddWindow();
+        GetWindow(manual).minimized = true;
+        const HWND foreign = AddWindow(MonitorAt(1));
+        const HWND foreign_manual = AddWindow(MonitorAt(1));
+        GetWindow(foreign_manual).minimized = true;
+        fixture.Toggle();
+        Check(GetWindow(chrome).minimized && GetWindow(code).minimized && !GetWindow(foreign).minimized,
+            "only visible target windows are minimized");
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 2 && commands[0].first == code && commands[1].first == chrome,
+            "restore owned windows in reverse order despite visible foreign windows");
+        Check(GetWindow(manual).minimized && GetWindow(foreign_manual).minimized,
+            "manual minimizations on either monitor remain minimized");
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            fixture.Toggle();
+            fixture.Toggle();
+            Check(GetWindow(manual).minimized && !GetWindow(chrome).minimized,
+                "repeated toggles do not acquire manually minimized windows");
+        }
     }
-    GetWindow(AddWindow()).ex_style = WS_EX_TOOLWINDOW;
-    GetWindow(AddWindow()).style = WS_CHILD;
-    GetWindow(AddWindow()).visible = false;
-    GetWindow(AddWindow()).cloaked = DWM_CLOAKED_SHELL;
-    const HWND ordinary = AddWindow();
-    GetWindow(ordinary).minimized = true;
-    manager.ToggleDesktop(target);
-    Check(commands.size() == 1 && commands[0].first == ordinary
-        && commands[0].second == SW_RESTORE, "shell, hidden, tool, child and cloaked windows ignored");
-
-    ResetWindows();
-    const HWND unsupported_dwm = AddWindow();
-    GetWindow(unsupported_dwm).dwm_result = E_INVALIDARG;
-    manager.ToggleDesktop(target);
-    Check(GetWindow(unsupported_dwm).minimized, "unsupported DWM query retains basic filtering");
-
-    ResetWindows();
-    AddWindow();
-    fail_enum_call = 1;
-    manager.ToggleDesktop(target);
-    Check(commands.empty() && enum_calls == 1, "failed scan performs no window operation");
-    enum_calls = 0;
-    fail_enum_call = 2;
-    manager.ToggleDesktop(target);
-    Check(commands.empty(), "failed action enumeration is harmless");
-
-    ResetWindows();
-    const HWND failed = AddWindow();
-    const HWND successful = AddWindow();
-    GetWindow(failed).fail_show = true;
-    manager.ToggleDesktop(target);
-    Check(!GetWindow(failed).minimized && GetWindow(successful).minimized,
-        "one failed operation does not block other windows");
-    GetWindow(failed).fail_show = false;
-    commands.clear();
-    manager.ToggleDesktop(target);
-    Check(commands.size() == 1 && commands[0].second == SW_MINIMIZE,
-        "next press follows actual window state after failure");
-
-    ResetWindows();
-    AddWindow();
-    AddWindow();
-    before_second_enum = [] { windows.front().alive = false; };
-    manager.ToggleDesktop(target);
-    Check(commands.size() == 1 && windows.back().minimized,
-        "window closed between enumerations is skipped");
-
-    ResetWindows();
-    AddWindow();
-    const HWND stays = AddWindow();
-    before_second_enum = [] { windows.front().monitor = MonitorAt(1); };
-    manager.ToggleDesktop(target);
-    Check(commands.size() == 1 && commands[0].first == stays,
-        "window moved to another monitor between enumerations is skipped");
-
-    ResetWindows();
-    const HWND reconnect = AddWindow();
-    manager.ToggleDesktop(target);
-    commands.clear();
-    monitors.front().alive = false;
-    manager.ToggleDesktop(target);
-    Check(commands.empty(), "disconnected target never falls back to another monitor");
-    const HMONITOR replacement = AddMonitor(L"\\\\.\\DISPLAY1", {2000, -1000, 4560, 440});
-    GetWindow(reconnect).monitor = replacement;
-    manager.ToggleDesktop(target);
-    Check(!GetWindow(reconnect).minimized && commands.size() == 1 && monitor_enum_calls == 3,
-        "reconnected device is resolved to its new handle on every press");
-
-    ResetWindows();
-    AddWindow();
-    fail_monitor_enum = true;
-    manager.ToggleDesktop(target);
-    Check(commands.empty() && enum_calls == 0, "failed monitor enumeration performs no window operation");
-    fail_monitor_enum = false;
-    monitors.back().fail_info = true;
-    manager.ToggleDesktop(target);
-    Check(commands.empty() && enum_calls == 0, "incomplete monitor lookup performs no window operation");
-
-    ResetWindows();
-    AddWindow();
-    after_first_enum = [] { monitors.front().alive = false; };
-    manager.ToggleDesktop(target);
-    Check(commands.empty() && enum_calls == 1, "target disconnected during scan cancels the action");
-
-    ResetWindows();
-    AddWindow();
-    after_first_enum = [] { monitors.front().device_name = L"\\\\.\\DISPLAY3"; };
-    manager.ToggleDesktop(target);
-    Check(commands.empty() && enum_calls == 1, "reassigned monitor handle during scan cancels the action");
-
-    ResetWindows();
-    manager.ToggleDesktop(MonitorTarget{});
-    manager.ToggleDesktop(MonitorTarget{L"\\\\.\\DISPLAY99"});
-    Check(commands.empty() && enum_calls == 0, "empty or unknown device is never interpreted as primary");
-    manager.ToggleDesktop(target);
-    Check(commands.empty(), "empty desktop is a no-op");
+    {
+        DesktopFixture fixture;
+        const HWND code = AddWindow();
+        fixture.Toggle();
+        const HWND notepad = AddWindow();
+        fixture.Toggle();
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 1 && commands[0].first == notepad && GetWindow(code).minimized,
+            "successful new batch replaces rather than accumulates older windows");
+        fixture.Toggle();
+        fixture.Toggle();
+        Check(GetWindow(code).minimized && !GetWindow(notepad).minimized, "later toggles only manage Notepad");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND notepad = AddWindow(MonitorAt(1));
+        fixture.manager.ToggleDesktop(fixture.secondary);
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.empty() && GetWindow(notepad).minimized, "foreign candidate is neither promoted nor restored");
+        fixture.manager.ToggleDesktop({L"\\\\.\\DISPLAY2"});
+        Check(commands.size() == 1 && !GetWindow(notepad).minimized, "return to original device preserves candidate");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND notepad = AddWindow(MonitorAt(1));
+        fixture.manager.ToggleDesktop(fixture.secondary);
+        const HWND blocker = AddWindow(MonitorAt(1));
+        GetWindow(blocker).ignore_minimize = true;
+        fixture.manager.ToggleDesktop(fixture.secondary); // Notepad is now the restore batch.
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.empty() && GetWindow(notepad).minimized, "foreign restore batch is not traversed or cleared");
+        GetWindow(blocker).alive = false;
+        fixture.manager.ToggleDesktop(fixture.secondary);
+        Check(commands.size() == 1 && commands[0].first == notepad, "foreign candidate and restore survive target switch");
+    }
+    for (bool accepted_without_effect : {false, true}) {
+        DesktopFixture fixture;
+        const HWND chrome = AddWindow();
+        const HWND blocker = AddWindow();
+        GetWindow(blocker).fail_show = !accepted_without_effect;
+        GetWindow(blocker).ignore_minimize = accepted_without_effect;
+        fixture.Toggle();
+        Check(GetWindow(chrome).minimized && !GetWindow(blocker).minimized, "one failed minimize does not stop another");
+        fixture.Toggle();
+        fixture.Toggle();
+        GetWindow(blocker).alive = false;
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 1 && commands[0].first == chrome && !GetWindow(chrome).minimized,
+            "failed or ineffective new requests do not discard last useful restore batch");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        GetWindow(window).defer_minimize = true;
+        fixture.Toggle();
+        Check(!GetWindow(window).minimized, "async request need not finish before toggle returns");
+        GetWindow(window).minimized = true; // Deliver the queued request later, with no minimize-start tracking.
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 1 && !GetWindow(window).minimized, "delayed request is validated when needed");
+    }
+    for (bool promote_first : {false, true}) {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        fixture.Toggle();
+        HWND blocker = nullptr;
+        if (promote_first) {
+            blocker = AddWindow();
+            GetWindow(blocker).ignore_minimize = true;
+            fixture.Toggle();
+        }
+        // Restore then re-minimize before event delivery: current state alone cannot detect it.
+        GetWindow(window).minimized = false;
+        GetWindow(window).minimized = true;
+        RestoreEvent(window);
+        if (blocker != nullptr) { GetWindow(blocker).alive = false; }
+        commands.clear();
+        fixture.Toggle();
+        fixture.Toggle();
+        Check(commands.empty() && GetWindow(window).minimized, "restore event permanently revokes candidate or restore entry");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        during_show = [](HWND hwnd, int command) { if (command == SW_MINIMIZE) { RestoreEvent(hwnd); } };
+        fixture.Toggle();
+        during_show = nullptr;
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.empty() && GetWindow(window).minimized, "restore during API call cannot be re-added after return");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND first = AddWindow();
+        const HWND last = AddWindow();
+        fixture.Toggle();
+        RestoreEvent(first, EVENT_SYSTEM_MINIMIZESTART);
+        RestoreEvent(first, EVENT_SYSTEM_MINIMIZEEND, OBJID_CLIENT);
+        RestoreEvent(first, EVENT_SYSTEM_MINIMIZEEND, OBJID_WINDOW, 1);
+        window_event_proc(reinterpret_cast<HWINEVENTHOOK>(999), EVENT_SYSTEM_MINIMIZEEND,
+            first, OBJID_WINDOW, CHILDID_SELF, 200, 0);
+        during_show = [](HWND, int command) {
+            if (command == SW_RESTORE) { RestoreEvent(reinterpret_cast<HWND>(&windows.front())); }
+        };
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 1 && commands[0].first == last && GetWindow(first).minimized,
+            "reentrant callback revokes a later restore without invalidating iteration");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        fixture.Toggle();
+        during_identity = [](HWND hwnd) { during_identity = nullptr; RestoreEvent(hwnd); };
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.empty() && GetWindow(window).minimized, "revocation during candidate validation never resurrects entry");
+    }
+    for (int invalidation = 0; invalidation < 9; ++invalidation) {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        fixture.Toggle();
+        auto& current = GetWindow(window);
+        switch (invalidation) {
+        case 0: current.alive = false; break;
+        case 1: ++current.process_id; break;
+        case 2: ++current.thread_id; break;
+        case 3: current.monitor = MonitorAt(1); break;
+        case 4: current.visible = false; break;
+        case 5: current.ex_style = WS_EX_TOOLWINDOW; break;
+        case 6: current.ex_style = WS_EX_TOPMOST; break;
+        case 7: current.cloaked = DWM_CLOAKED_SHELL; break;
+        case 8: current.style = WS_CHILD; break;
+        }
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.empty(), "invalid identity, screen, visibility or classification cannot be restored");
+        current = Window{};
+        current.monitor = MonitorAt(0);
+        current.minimized = true;
+        fixture.Toggle();
+        Check(commands.empty(), "invalid record was removed rather than retained for later");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND failed = AddWindow();
+        const HWND successful = AddWindow();
+        fixture.Toggle();
+        GetWindow(failed).fail_restore = true;
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 2 && GetWindow(failed).minimized && !GetWindow(successful).minimized,
+            "restore failure retains entry and continues with other records");
+        GetWindow(successful).minimized = true; // Manual minimization, not owned again.
+        GetWindow(failed).fail_restore = false;
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 1 && commands[0].first == failed && GetWindow(successful).minimized,
+            "retry only restores the retained failed entry");
+    }
+    {
+        DesktopFixture fixture;
+        desktop = AddWindow();
+        shell = AddWindow();
+        for (const wchar_t* name : {L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd"}) {
+            GetWindow(AddWindow()).class_name = name;
+        }
+        GetWindow(AddWindow()).ex_style = WS_EX_TOOLWINDOW;
+        GetWindow(AddWindow()).style = WS_CHILD;
+        GetWindow(AddWindow()).visible = false;
+        GetWindow(AddWindow()).cloaked = DWM_CLOAKED_SHELL;
+        const HWND exempt = AddWindow();
+        GetWindow(exempt).ex_style = WS_EX_TOPMOST;
+        const HWND topmost = AddWindow();
+        GetWindow(topmost).ex_style = WS_EX_TOPMOST;
+        GetWindow(topmost).style = WS_MINIMIZEBOX;
+        const HWND ordinary = AddWindow(); // No minimize box, but not topmost.
+        GetWindow(ordinary).dwm_result = E_INVALIDARG;
+        GetWindow(ordinary).cloaked = DWM_CLOAKED_SHELL; // Failed attribute query must ignore the output.
+        fixture.Toggle();
+        Check(commands.size() == 2 && !GetWindow(exempt).minimized && GetWindow(topmost).minimized
+            && GetWindow(ordinary).minimized, "classification distinguishes topmost exception, button presence and Win7 fallback");
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.size() == 2 && !GetWindow(topmost).minimized && !GetWindow(ordinary).minimized,
+            "exempt visible window does not prevent restoring ordinary windows");
+    }
+    for (int failure = 0; failure < 4; ++failure) {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        fixture.Toggle();
+        if (failure == 0) { fail_monitor_enum = true; }
+        if (failure == 1) { monitors.back().fail_info = true; }
+        if (failure == 2) { fail_enum_call = enum_calls + 1; }
+        if (failure == 3) { monitors.front().alive = false; }
+        commands.clear();
+        fixture.Toggle();
+        Check(commands.empty(), "failed query does not perform window operations");
+        fail_monitor_enum = false;
+        monitors.back().fail_info = false;
+        fail_enum_call = 0;
+        monitors.front().alive = true;
+        fixture.Toggle();
+        Check(commands.size() == 1 && commands[0].first == window, "failed query preserves pending batch");
+    }
+    {
+        DesktopFixture fixture;
+        const HWND window = AddWindow();
+        fixture.Toggle();
+        commands.clear();
+        monitors.front().alive = false;
+        fixture.Toggle();
+        const HMONITOR replacement = AddMonitor(L"\\\\.\\DISPLAY1", {2000, -1000, 4560, 440});
+        GetWindow(window).monitor = replacement;
+        fixture.Toggle();
+        Check(commands.size() == 1 && !GetWindow(window).minimized, "reconnected monitor is resolved by device name");
+    }
+    for (bool move : {false, true}) {
+        DesktopFixture fixture;
+        AddWindow();
+        const HWND stays = AddWindow();
+        after_first_enum = move ? +[] { windows.front().monitor = MonitorAt(1); }
+            : +[] { windows.front().alive = false; };
+        fixture.Toggle();
+        Check(commands.size() == 1 && commands[0].first == stays, "recheck live windows between collection and operation");
+    }
+    for (bool rename : {false, true}) {
+        DesktopFixture fixture;
+        AddWindow();
+        after_first_enum = rename ? +[] { monitors.front().device_name = L"\\\\.\\DISPLAY3"; }
+            : +[] { monitors.front().alive = false; };
+        fixture.Toggle();
+        Check(commands.empty(), "topology change during enumeration cancels before candidate replacement");
+    }
+    {
+        DesktopFixture fixture;
+        fixture.manager.ToggleDesktop({});
+        fixture.manager.ToggleDesktop({L"\\\\.\\DISPLAY99"});
+        fixture.Toggle();
+        Check(commands.empty(), "empty target, unknown target and empty desktop are no-ops");
+    }
+    Check(window_event_hook == nullptr && tracking_uninstalls == tracking_installs - 2,
+        "all successful tracking hooks are released; two failed starts own no hook");
 }
 
 void TestKeyboard()

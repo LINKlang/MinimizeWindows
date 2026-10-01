@@ -349,6 +349,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     }
 
     DesktopManager desktop_manager;
+    if (!desktop_manager.StartTracking()) {
+        return ReportStartupError(FormatError(L"Window restore event tracking", GetLastError()));
+    }
     KeyboardHook keyboard_hook;
     if (!keyboard_hook.Install()) {
         OutputDebugStringW(L"MinimizeWindows: keyboard hook installation failed.\n");

@@ -15,6 +15,15 @@
 
 namespace {
 
+unsigned int restore_events = 0;
+
+void CALLBACK CountRestoreEvents(HWINEVENTHOOK, DWORD event, HWND, LONG object, LONG child, DWORD, DWORD)
+{
+    if (event == EVENT_SYSTEM_MINIMIZEEND && object == OBJID_WINDOW && child == CHILDID_SELF) {
+        ++restore_events;
+    }
+}
+
 void Check(bool condition, const char* message)
 {
     if (!condition) {
@@ -101,6 +110,7 @@ int wmain(int argument_count, wchar_t* arguments[])
             | DESKTOP_HOOKCONTROL, nullptr);
     Check(test_desktop != nullptr, "create isolated test desktop");
     Check(SetThreadDesktop(test_desktop) != FALSE, "attach to isolated desktop");
+    {
     // Fixtures do not accept text input. Prevent system IME UI from becoming
     // extra visible windows while their async minimize/restore messages run.
     ImmDisableIME(0);
@@ -109,6 +119,11 @@ int wmain(int argument_count, wchar_t* arguments[])
         "SetThreadDpiAwarenessContext"));
     const HANDLE previous_context = set_context != nullptr
         ? set_context(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-3))) : nullptr;
+    DesktopManager manager;
+    Check(manager.StartTracking(), "start native restore tracking on isolated desktop");
+    const HWINEVENTHOOK observer = SetWinEventHook(EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND,
+        nullptr, CountRestoreEvents, GetCurrentProcessId(), 0, WINEVENT_OUTOFCONTEXT);
+    Check(observer != nullptr, "observe native restore events for test synchronization");
     KeyboardHook keyboard_hook;
     Check(keyboard_hook.Install(), "install native keyboard hook on isolated desktop");
 
@@ -162,7 +177,6 @@ int wmain(int argument_count, wchar_t* arguments[])
     RECT chrome_bounds;
     Check(GetWindowRect(chrome, &chrome_bounds) != FALSE, "read original window bounds");
 
-    DesktopManager manager;
     manager.ToggleDesktop(target);
     WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(manual)
         && (spanning == nullptr || IsIconic(spanning)); }, "minimize only target monitor windows");
@@ -170,17 +184,11 @@ int wmain(int argument_count, wchar_t* arguments[])
     Check(foreign == nullptr || (!IsIconic(foreign) && IsIconic(foreign_manual)),
         "other monitor retains visible and manually minimized windows");
 
-    const HWND notepad = create_window(monitors.front().info.rcWork);
     manager.ToggleDesktop(target);
-    WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(manual) && IsIconic(notepad); },
-        "new window causes another minimize");
-    Check(IsIconic(chrome) && IsIconic(code), "previous windows stay minimized");
-
-    DesktopManager fresh_manager;
-    fresh_manager.ToggleDesktop(target);
     WaitFor([&] { return !IsIconic(chrome) && !IsIconic(code)
-        && !IsIconic(manual) && !IsIconic(notepad) && (spanning == nullptr || !IsIconic(spanning)); },
-        "restore all target windows without history despite visible windows on another monitor");
+        && (spanning == nullptr || !IsIconic(spanning)); },
+        "restore only our target windows despite visible windows on another monitor");
+    Check(IsIconic(manual), "manual target minimization is not restored");
     Check(foreign == nullptr || (!IsIconic(foreign) && IsIconic(foreign_manual)),
         "target restoration does not restore other monitor's minimized windows");
     Check(IsZoomed(code) != FALSE, "restore maximized window as maximized");
@@ -188,15 +196,36 @@ int wmain(int argument_count, wchar_t* arguments[])
     Check(GetWindowRect(chrome, &restored_bounds) != FALSE
         && EqualRect(&chrome_bounds, &restored_bounds), "restore normal window position and size");
 
+    manager.ToggleDesktop(target);
+    WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && (spanning == nullptr || IsIconic(spanning)); },
+        "minimize first batch again");
+    const HWND notepad = create_window(monitors.front().info.rcWork);
+    manager.ToggleDesktop(target);
+    WaitFor([&] { return IsIconic(notepad); }, "new window creates a new candidate batch");
+    manager.ToggleDesktop(target);
+    WaitFor([&] { return !IsIconic(notepad); }, "restore only latest successful batch");
+    Check(IsIconic(chrome) && IsIconic(code) && IsIconic(manual)
+        && (spanning == nullptr || IsIconic(spanning)), "older batch remains minimized");
+
+    manager.ToggleDesktop(target);
+    WaitFor([&] { return IsIconic(notepad); }, "prepare manual restore and re-minimize test");
+    const unsigned int before_manual_restore = restore_events;
+    ShowWindow(notepad, SW_RESTORE);
+    ShowWindow(notepad, SW_MINIMIZE);
+    WaitFor([&] { return restore_events > before_manual_restore && IsIconic(notepad); },
+        "deliver restore event after the fixture is already re-minimized");
+    manager.ToggleDesktop(target);
+    Check(IsIconic(notepad), "manual restore permanently revokes a candidate even after re-minimize");
+
     if (foreign != nullptr) {
-        manager.ToggleDesktop(target);
-        WaitFor([&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(manual) && IsIconic(notepad); },
-            "prepare first monitor as clean desktop");
         const MonitorTarget second{monitors[1].info.szDevice};
         manager.ToggleDesktop(second);
         WaitFor([&] { return IsIconic(foreign) && IsIconic(foreign_manual); }, "minimize non-primary target");
+        manager.ToggleDesktop(target);
+        Check(IsIconic(foreign), "first monitor cannot promote or restore second monitor's candidate");
         manager.ToggleDesktop(second);
-        WaitFor([&] { return !IsIconic(foreign) && !IsIconic(foreign_manual); }, "restore non-primary target");
+        WaitFor([&] { return !IsIconic(foreign); }, "restore non-primary target after switching back");
+        Check(IsIconic(foreign_manual), "manually minimized non-primary window stays minimized");
         Check(IsIconic(chrome) && IsIconic(code) && IsIconic(notepad),
             "switching the target never restores the first monitor");
     }
@@ -252,7 +281,7 @@ int wmain(int argument_count, wchar_t* arguments[])
         };
         run_child(L"", [&] { return IsIconic(chrome) && IsIconic(code) && IsIconic(manual) && IsIconic(notepad)
             && (foreign == nullptr || (!IsIconic(foreign) && IsIconic(foreign_manual))); },
-            [&] { return !IsIconic(chrome) && !IsIconic(code) && !IsIconic(manual) && !IsIconic(notepad)
+            [&] { return !IsIconic(chrome) && !IsIconic(code) && IsIconic(manual) && !IsIconic(notepad)
                 && (foreign == nullptr || (!IsIconic(foreign) && IsIconic(foreign_manual))); });
         if (foreign != nullptr) {
             std::wstring device = monitors[1].info.szDevice;
@@ -262,7 +291,7 @@ int wmain(int argument_count, wchar_t* arguments[])
             run_child(L" --monitor \"" + device + L"\"",
                 [&] { return IsIconic(foreign) && IsIconic(foreign_manual)
                     && !IsIconic(chrome) && !IsIconic(code) && !IsIconic(notepad); },
-                [&] { return !IsIconic(foreign) && !IsIconic(foreign_manual)
+                [&] { return !IsIconic(foreign) && IsIconic(foreign_manual)
                     && !IsIconic(chrome) && !IsIconic(code) && !IsIconic(notepad); });
         }
         CloseHandle(child_job);
@@ -273,10 +302,12 @@ int wmain(int argument_count, wchar_t* arguments[])
     }
     UnregisterClassW(window_class.lpszClassName, module);
     keyboard_hook.Uninstall();
+    Check(UnhookWinEvent(observer) != FALSE, "unhook native restore test observer");
     if (previous_context != nullptr) { set_context(previous_context); }
+    std::printf("Native window/hook/app tests passed (%zu monitor(s), latest batches, restore revocation and isolation).\n",
+        monitors.size());
+    }
     Check(SetThreadDesktop(original_desktop) != FALSE, "detach from test desktop");
     Check(CloseDesktop(test_desktop) != FALSE, "close isolated desktop");
-    std::printf("Native window/hook/app tests passed (%zu monitor(s), target isolation and normal/maximized restore).\n",
-        monitors.size());
     return 0;
 }

@@ -26,6 +26,12 @@ try {
         throw 'Behavior tests failed.'
     }
 
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /Fe:"' + $testOutput + '\startup_tests.exe" /Fo:"' + $testOutput + '\startup_tests.obj" tests\startup_tests.cpp user32.lib dwmapi.lib shell32.lib /link /subsystem:console'
+    & $env:ComSpec /d /s /c $compile
+    if ($LASTEXITCODE -ne 0) { throw 'Compiling startup tests failed.' }
+    & (Join-Path $testOutput 'startup_tests.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Startup tests failed.' }
+
     $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /Fe:"' + $testOutput + '\window_integration_tests.exe" /Fo:build\tests\ tests\window_integration_tests.cpp src\desktop_manager.cpp src\keyboard_hook.cpp user32.lib dwmapi.lib imm32.lib'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) {

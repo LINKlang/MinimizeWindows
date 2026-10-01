@@ -1,14 +1,18 @@
 #include "desktop_manager.h"
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 #include <dwmapi.h>
 
+#include <algorithm>
 #include <cwchar>
+#include <new>
+#include <utility>
 
 namespace {
+
+bool SameDevice(const std::wstring& first, const std::wstring& second)
+{
+    return _wcsicmp(first.c_str(), second.c_str()) == 0;
+}
 
 struct MonitorLookup {
     const std::wstring& device_name;
@@ -29,104 +33,232 @@ BOOL CALLBACK FindTargetMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM data)
     return TRUE;
 }
 
-struct WindowCommand {
-    HMONITOR monitor;
-    bool has_visible_window = false;
-    int command = SW_MINIMIZE;
-};
-
-bool IsOrdinaryWindow(HWND hwnd)
+bool TargetStillAvailable(HMONITOR monitor, const std::wstring& device_name)
 {
-    if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)) {
-        return false;
-    }
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    return GetMonitorInfoW(monitor, &info)
+        && _wcsicmp(info.szDevice, device_name.c_str()) == 0;
+}
 
-    if (hwnd == GetDesktopWindow() || hwnd == GetShellWindow()) {
-        return false;
-    }
+enum class WindowClassification { ShouldMinimize, Exempt, Ignore };
 
+bool HasStandardMinimizeBox(HWND hwnd)
+{
+    return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_MINIMIZEBOX) != 0;
+}
+
+bool IsCloaked(HWND hwnd)
+{
+    DWORD cloaked = 0;
+    const HRESULT result = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    // Windows 7 does not support this attribute. Keep the basic filters there.
+    return SUCCEEDED(result) && cloaked != 0;
+}
+
+WindowClassification ClassifyWindow(HWND hwnd)
+{
+    if (!IsWindow(hwnd) || !IsWindowVisible(hwnd)
+        || hwnd == GetDesktopWindow() || hwnd == GetShellWindow()) {
+        return WindowClassification::Ignore;
+    }
+    const LONG_PTR extended_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0
-        || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) {
-        return false;
+        || (extended_style & WS_EX_TOOLWINDOW) != 0) {
+        return WindowClassification::Ignore;
     }
 
     wchar_t class_name[256];
     if (GetClassNameW(hwnd, class_name, ARRAYSIZE(class_name)) == 0) {
-        return false;
+        return WindowClassification::Ignore;
     }
 
     if (std::wcscmp(class_name, L"Progman") == 0
         || std::wcscmp(class_name, L"WorkerW") == 0
         || std::wcscmp(class_name, L"Shell_TrayWnd") == 0
-        || std::wcscmp(class_name, L"Shell_SecondaryTrayWnd") == 0) {
-        return false;
+        || std::wcscmp(class_name, L"Shell_SecondaryTrayWnd") == 0
+        || IsCloaked(hwnd)) {
+        return WindowClassification::Ignore;
     }
 
-    DWORD cloaked = 0;
-    // Older systems may not support DWMWA_CLOAKED; keep the basic filters there.
-    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED,
-            &cloaked, sizeof(cloaked))) && cloaked != 0) {
-        return false;
+    if ((extended_style & WS_EX_TOPMOST) != 0 && !HasStandardMinimizeBox(hwnd)) {
+        return WindowClassification::Exempt;
     }
-
-    return true;
+    return WindowClassification::ShouldMinimize;
 }
 
-BOOL CALLBACK FindVisibleWindow(HWND hwnd, LPARAM data)
+bool SameIdentity(const WindowRecord& record)
 {
-    auto& operation = *reinterpret_cast<WindowCommand*>(data);
-    if (IsOrdinaryWindow(hwnd) && !IsIconic(hwnd)
-        && MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == operation.monitor) {
-        operation.has_visible_window = true;
-    }
-    return TRUE;
+    if (!IsWindow(record.hwnd)) { return false; }
+    DWORD process = 0;
+    const DWORD thread = GetWindowThreadProcessId(record.hwnd, &process);
+    return record.processId != 0 && record.threadId != 0
+        && record.processId == process && record.threadId == thread;
 }
 
-BOOL CALLBACK ApplyWindowCommand(HWND hwnd, LPARAM data)
+bool ValidateRecord(const WindowRecord& record, HMONITOR monitor)
 {
-    const auto& operation = *reinterpret_cast<const WindowCommand*>(data);
-    if (!IsOrdinaryWindow(hwnd)
-        || MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != operation.monitor) {
+    return SameIdentity(record) && IsIconic(record.hwnd)
+        && ClassifyWindow(record.hwnd) == WindowClassification::ShouldMinimize
+        && MonitorFromWindow(record.hwnd, MONITOR_DEFAULTTONEAREST) == monitor;
+}
+
+bool SameRecord(const WindowRecord& first, const WindowRecord& second)
+{
+    return first.hwnd == second.hwnd && first.processId == second.processId
+        && first.threadId == second.threadId;
+}
+
+bool ContainsRecord(const WindowBatch& batch, const WindowRecord& record)
+{
+    return std::any_of(batch.windows.begin(), batch.windows.end(), [&](const WindowRecord& current) {
+        return SameRecord(current, record);
+    });
+}
+
+void EraseRecord(WindowBatch& batch, const WindowRecord& record)
+{
+    batch.windows.erase(std::remove_if(batch.windows.begin(), batch.windows.end(),
+        [&](const WindowRecord& current) { return SameRecord(current, record); }), batch.windows.end());
+}
+
+void EraseWindow(WindowBatch& batch, HWND hwnd)
+{
+    batch.windows.erase(std::remove_if(batch.windows.begin(), batch.windows.end(),
+        [hwnd](const WindowRecord& record) { return record.hwnd == hwnd; }), batch.windows.end());
+}
+
+struct WindowScan {
+    HMONITOR monitor;
+    bool blocking = false;
+    std::vector<WindowRecord> windows;
+};
+
+BOOL CALLBACK CollectWindows(HWND hwnd, LPARAM data)
+{
+    auto& scan = *reinterpret_cast<WindowScan*>(data);
+    if (ClassifyWindow(hwnd) != WindowClassification::ShouldMinimize || IsIconic(hwnd)
+        || MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != scan.monitor) {
         return TRUE;
     }
-
-    const int command = operation.command;
-    const bool minimized = IsIconic(hwnd) != FALSE;
-    if ((command == SW_MINIMIZE && !minimized)
-        || (command == SW_RESTORE && minimized)) {
-        ShowWindowAsync(hwnd, command);
-    }
+    scan.blocking = true;
+    WindowRecord record{hwnd, 0, 0};
+    record.threadId = GetWindowThreadProcessId(hwnd, &record.processId);
+    if (record.processId == 0 || record.threadId == 0) { return TRUE; }
+    try { scan.windows.push_back(record); }
+    catch (const std::bad_alloc&) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
     return TRUE;
 }
 
 } // namespace
 
+DesktopManager* DesktopManager::active_manager_ = nullptr;
+
+DesktopManager::~DesktopManager()
+{
+    if (active_manager_ == this) { active_manager_ = nullptr; }
+    if (event_hook_ != nullptr) { UnhookWinEvent(event_hook_); }
+}
+
+bool DesktopManager::StartTracking()
+{
+    if (event_hook_ != nullptr) {
+        if (tracking_thread_ == GetCurrentThreadId()) { return true; }
+        SetLastError(ERROR_INVALID_THREAD_ID);
+        return false;
+    }
+    if (active_manager_ != nullptr) {
+        SetLastError(ERROR_ALREADY_EXISTS);
+        return false;
+    }
+    SetLastError(ERROR_SUCCESS);
+    event_hook_ = SetWinEventHook(EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND,
+        nullptr, WindowEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
+    if (event_hook_ == nullptr) {
+        if (GetLastError() == ERROR_SUCCESS) { SetLastError(ERROR_GEN_FAILURE); }
+        return false;
+    }
+    tracking_thread_ = GetCurrentThreadId();
+    active_manager_ = this;
+    return true;
+}
+
+void CALLBACK DesktopManager::WindowEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd,
+    LONG object, LONG child, DWORD, DWORD)
+{
+    DesktopManager* self = active_manager_;
+    if (self == nullptr || hook != self->event_hook_ || event != EVENT_SYSTEM_MINIMIZEEND
+        || hwnd == nullptr || object != OBJID_WINDOW || child != CHILDID_SELF) {
+        return;
+    }
+    // This history cannot be inferred from IsIconic after a manual re-minimize.
+    EraseWindow(self->candidateBatch_, hwnd);
+    EraseWindow(self->restoreBatch_, hwnd);
+}
+
 void DesktopManager::ToggleDesktop(const MonitorTarget& target)
 {
-    if (target.device_name.empty()) {
+    if (event_hook_ == nullptr || tracking_thread_ != GetCurrentThreadId() || target.device_name.empty()) {
         return;
     }
+    try {
+        MonitorLookup lookup{target.device_name};
+        if (!EnumDisplayMonitors(nullptr, nullptr, FindTargetMonitor,
+                reinterpret_cast<LPARAM>(&lookup)) || lookup.monitor == nullptr) {
+            return;
+        }
+        WindowScan scan{lookup.monitor};
+        if (!EnumWindows(CollectWindows, reinterpret_cast<LPARAM>(&scan))
+            || !TargetStillAvailable(lookup.monitor, target.device_name)) {
+            return;
+        }
 
-    MonitorLookup lookup{target.device_name};
-    if (!EnumDisplayMonitors(nullptr, nullptr, FindTargetMonitor,
-            reinterpret_cast<LPARAM>(&lookup)) || lookup.monitor == nullptr) {
-        return;
+        if (SameDevice(candidateBatch_.device_name, target.device_name)) {
+            // WinEvent may erase members during a window query. Iterate a copy.
+            const auto candidates = candidateBatch_.windows;
+            for (const auto& record : candidates) {
+                if (!TargetStillAvailable(lookup.monitor, target.device_name)) { return; }
+                if (!ValidateRecord(record, lookup.monitor)) { EraseRecord(candidateBatch_, record); }
+            }
+            if (!candidateBatch_.windows.empty()) { restoreBatch_ = std::move(candidateBatch_); }
+            candidateBatch_ = {};
+        }
+
+        if (scan.blocking) {
+            WindowBatch next;
+            next.device_name = target.device_name;
+            next.windows.reserve(scan.windows.size());
+            candidateBatch_ = std::move(next);
+            for (const auto& record : scan.windows) {
+                if (!TargetStillAvailable(lookup.monitor, target.device_name)) { return; }
+                if (!SameIdentity(record) || ClassifyWindow(record.hwnd) != WindowClassification::ShouldMinimize
+                    || IsIconic(record.hwnd)
+                    || MonitorFromWindow(record.hwnd, MONITOR_DEFAULTTONEAREST) != lookup.monitor) {
+                    continue;
+                }
+                // Register before the API call so an intervening restore can revoke it.
+                candidateBatch_.windows.push_back(record);
+                if (!ShowWindowAsync(record.hwnd, SW_MINIMIZE)) { EraseRecord(candidateBatch_, record); }
+                // TODO: emulate desktop occlusion for windows that accept a show-state
+                // request but never become iconic. They continue to block the desktop.
+            }
+            return;
+        }
+
+        if (!SameDevice(restoreBatch_.device_name, target.device_name)) { return; }
+        const auto records = restoreBatch_.windows;
+        for (auto iterator = records.rbegin(); iterator != records.rend(); ++iterator) {
+            const WindowRecord record = *iterator;
+            if (!ContainsRecord(restoreBatch_, record)) { continue; }
+            if (!TargetStillAvailable(lookup.monitor, target.device_name)) { return; }
+            if (!ValidateRecord(record, lookup.monitor)) {
+                EraseRecord(restoreBatch_, record);
+                continue;
+            }
+            if (ContainsRecord(restoreBatch_, record) && ShowWindowAsync(record.hwnd, SW_RESTORE)) {
+                EraseRecord(restoreBatch_, record);
+            }
+        }
     }
-
-    WindowCommand operation{lookup.monitor};
-    if (!EnumWindows(FindVisibleWindow,
-            reinterpret_cast<LPARAM>(&operation))) {
-        return;
-    }
-
-    // A topology change during the scan must not redirect the operation.
-    MONITORINFOEXW current{};
-    current.cbSize = sizeof(current);
-    if (!GetMonitorInfoW(lookup.monitor, &current)
-        || _wcsicmp(current.szDevice, target.device_name.c_str()) != 0) {
-        return;
-    }
-
-    operation.command = operation.has_visible_window ? SW_MINIMIZE : SW_RESTORE;
-    EnumWindows(ApplyWindowCommand, reinterpret_cast<LPARAM>(&operation));
+    catch (const std::bad_alloc&) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); }
 }
