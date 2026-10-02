@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">MinimizeWindows</title>
+  <desc id="description">A blue rounded square with two overlapping white screen outlines and a minimize bar on the front screen.</desc>
+
+  <rect width="256" height="256" rx="56" fill="#0078D4"/>
+  <path d="M92 104V70C92 63.373 97.373 58 104 58H192C198.627 58 204 63.373 204 70V132C204 138.627 198.627 144 192 144H180" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="52" y="104" width="128" height="94" rx="12" fill="#0078D4" stroke="#FFFFFF" stroke-width="14"/>
+  <rect x="86" y="151" width="60" height="14" rx="7" fill="#FFFFFF"/>
+</svg>

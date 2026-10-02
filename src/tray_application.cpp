@@ -1,6 +1,7 @@
 #include "tray_application.h"
 #include "keyboard_hook.h"
 #include "settings_window.h"
+#include "resources.h"
 
 #include <shellapi.h>
 #include <new>
@@ -32,7 +33,7 @@ public:
         if (Create(nullptr, &bounds, L"MinimizeWindows", WS_POPUP, WS_EX_TOOLWINDOW) == nullptr) {
             return false;
         }
-        icon_ = static_cast<HICON>(LoadImageW(nullptr, IDI_APPLICATION, IMAGE_ICON,
+        icon_ = static_cast<HICON>(LoadImageW(_Module.GetResourceInstance(), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
             GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
         if (icon_ == nullptr || !AddTrayIcon()) { return false; }
         if (!desktop_manager_.StartTracking()) { return false; }

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="MinimizeWindows logo" width="160" height="160" />
+</p>
+
 <h1 align="center">MinimizeWindows</h1>
 
 <p align="center">

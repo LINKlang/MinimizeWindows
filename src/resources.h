@@ -1,5 +1,6 @@
 #pragma once
 
+#define IDI_APP_ICON 101
 #define IDD_LICENSES 300
 #define IDR_APP_LICENSE 301
 #define IDR_WTL_LICENSE 302

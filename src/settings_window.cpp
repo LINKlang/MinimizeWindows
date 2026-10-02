@@ -16,7 +16,9 @@ bool SettingsWindow::Show(HICON icon, const std::vector<std::wstring>& devices, 
         OffsetRect(&bounds, -bounds.left, -bounds.top);
         if (Create(nullptr, &bounds, L"MinimizeWindows \u2014 Settings",
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, WS_EX_APPWINDOW) == nullptr) { return false; }
-        SetIcon(icon, TRUE);
+        const HICON large_icon = static_cast<HICON>(LoadImageW(_Module.GetResourceInstance(),
+            MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
+        SetIcon(large_icon != nullptr ? large_icon : icon, TRUE);
         SetIcon(icon, FALSE);
         CenterWindow();
     }
