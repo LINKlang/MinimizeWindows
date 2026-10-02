@@ -121,6 +121,12 @@ BOOL LicensesDialog::PreTranslateMessage(MSG* message)
 
 LRESULT LicensesDialog::OnInit(UINT, WPARAM, LPARAM, BOOL&)
 {
+    dpi_ = DisplayWindowDpi(m_hWnd);
+    // This dialog owns its layout and fonts, including on PMv2 systems.
+    using SetBehavior = BOOL (WINAPI*)(HWND, int, int);
+    const auto set_behavior = reinterpret_cast<SetBehavior>(GetProcAddress(
+        GetModuleHandleW(L"user32.dll"), "SetDialogDpiChangeBehavior"));
+    if (set_behavior != nullptr) { set_behavior(m_hWnd, 1 /* DDC_DISABLE_ALL */, 1); }
     background_ = CreateSolidBrush(RGB(32, 32, 32));
     panel_ = CreateSolidBrush(RGB(23, 23, 23));
     component_label_ = CreateWindowExW(0, L"STATIC", L"Component", WS_CHILD | WS_VISIBLE,
@@ -141,9 +147,8 @@ LRESULT LicensesDialog::OnInit(UINT, WPARAM, LPARAM, BOOL&)
     SendDlgItemMessage(ComponentId, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Windows Template Library (WTL) 10.01"));
     SendDlgItemMessage(ComponentId, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"nlohmann/json 3.12.0"));
     SendDlgItemMessage(TextId, EM_SETLIMITTEXT, 0, 0);
-    dpi_ = DisplayWindowDpi(m_hWnd);
     RECT bounds{0, 0, Px(720), Px(580)};
-    AdjustWindowRectEx(&bounds, GetStyle(), FALSE, GetExStyle());
+    DisplayAdjustWindowRectForDpi(&bounds, GetStyle(), FALSE, GetExStyle(), dpi_);
     SetWindowPos(nullptr, 0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top,
         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     Layout();
@@ -169,13 +174,12 @@ void LicensesDialog::UpdateContent()
 void LicensesDialog::Layout()
 {
     if (GetDlgItem(TextId) == nullptr) { return; }
-    const UINT dpi = DisplayWindowDpi(m_hWnd);
-    if (font_ == nullptr || dpi != dpi_) {
-        const HFONT next = CreateFontW(-MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    if (font_ == nullptr || font_dpi_ != dpi_) {
+        const HFONT next = CreateFontW(-Px(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         if (font_ != nullptr) { DeleteObject(font_); }
         font_ = next;
-        dpi_ = dpi;
+        font_dpi_ = dpi_;
         for (HWND child = ::GetWindow(m_hWnd, GW_CHILD); child != nullptr; child = ::GetWindow(child, GW_HWNDNEXT)) {
             ::SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
         }
@@ -208,15 +212,15 @@ LRESULT LicensesDialog::OnSize(UINT, WPARAM size, LPARAM, BOOL&)
 
 LRESULT LicensesDialog::OnMinimumSize(UINT, WPARAM, LPARAM parameter, BOOL&)
 {
-    const UINT dpi = DisplayWindowDpi(m_hWnd);
-    RECT bounds{0, 0, MulDiv(600, dpi, 96), MulDiv(440, dpi, 96)};
-    AdjustWindowRectEx(&bounds, GetStyle(), FALSE, GetExStyle());
+    RECT bounds{0, 0, Px(600), Px(440)};
+    DisplayAdjustWindowRectForDpi(&bounds, GetStyle(), FALSE, GetExStyle(), dpi_);
     reinterpret_cast<MINMAXINFO*>(parameter)->ptMinTrackSize = {bounds.right - bounds.left, bounds.bottom - bounds.top};
     return 0;
 }
 
-LRESULT LicensesDialog::OnDpiChanged(UINT, WPARAM, LPARAM parameter, BOOL&)
+LRESULT LicensesDialog::OnDpiChanged(UINT, WPARAM dpi, LPARAM parameter, BOOL&)
 {
+    dpi_ = LOWORD(dpi);
     const RECT* bounds = reinterpret_cast<const RECT*>(parameter);
     if (bounds != nullptr) { SetWindowPos(nullptr, bounds, SWP_NOZORDER | SWP_NOACTIVATE); }
     Layout();

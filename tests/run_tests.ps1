@@ -12,11 +12,36 @@ $wtlInclude = Join-Path $projectRoot 'third_party\wtl\Include'
 $jsonInclude = Join-Path $projectRoot 'third_party'
 [System.IO.Directory]::CreateDirectory($testOutput) | Out-Null
 
+function AssertApplicationManifest([string]$application, [string]$name) {
+    $manifestPath = Join-Path $testOutput "$name.manifest"
+    $extract = '"' + $vcvars + '" >nul && mt /nologo -inputresource:"' + $application + '";#1 -out:"' + $manifestPath + '"'
+    & $env:ComSpec /d /s /c $extract
+    if ($LASTEXITCODE -ne 0) { throw "Extracting $name manifest failed." }
+    [xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
+    $namespaces = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+    $namespaces.AddNamespace('asm', 'urn:schemas-microsoft-com:asm.v1')
+    $namespaces.AddNamespace('asmv3', 'urn:schemas-microsoft-com:asm.v3')
+    $namespaces.AddNamespace('dpi2005', 'http://schemas.microsoft.com/SMI/2005/WindowsSettings')
+    $namespaces.AddNamespace('dpi2016', 'http://schemas.microsoft.com/SMI/2016/WindowsSettings')
+    $dpiAware = $manifest.SelectSingleNode('//dpi2005:dpiAware', $namespaces)
+    $dpiAwareness = $manifest.SelectSingleNode('//dpi2016:dpiAwareness', $namespaces)
+    $privileges = $manifest.SelectSingleNode('//asmv3:requestedExecutionLevel', $namespaces)
+    $controls = $manifest.SelectSingleNode('//asm:dependentAssembly/asm:assemblyIdentity[@name="Microsoft.Windows.Common-Controls" and @version="6.0.0.0"]', $namespaces)
+    if (-not $dpiAware -or $dpiAware.InnerText.Trim() -ne 'true/pm' -or -not $dpiAwareness -or $dpiAwareness.InnerText.Trim() -ne 'PerMonitorV2,PerMonitor') {
+        throw "$name does not contain the expected DPI declarations."
+    }
+    if (-not $privileges -or $privileges.level -ne 'asInvoker' -or $privileges.uiAccess -ne 'false' -or -not $controls) {
+        throw "$name lost its privilege or Common Controls v6 declaration."
+    }
+    Write-Output "$name embedded DPI manifest verified."
+}
+
 Push-Location $projectRoot
 try {
     $msbuild = Join-Path $visualStudio 'MSBuild\Current\Bin\MSBuild.exe'
     $releaseApplication = Join-Path $projectRoot 'Release\MinimizeWindows.exe'
     foreach ($configuration in @('Debug', 'Release')) {
+        $outputDirectory = Join-Path $projectRoot $configuration
         $buildArguments = @((Join-Path $projectRoot 'MinimizeWindows.sln'), '-nologo', '-m', "-p:Configuration=$configuration", '-p:Platform=x86', '-verbosity:minimal')
         if ($ApplicationOutputRoot) {
             $outputDirectory = Join-Path ([System.IO.Path]::GetFullPath($ApplicationOutputRoot)) $configuration
@@ -25,6 +50,7 @@ try {
         }
         & $msbuild @buildArguments
         if ($LASTEXITCODE -ne 0) { throw "$configuration x86 build failed." }
+        AssertApplicationManifest (Join-Path $outputDirectory 'MinimizeWindows.exe') $configuration
     }
     $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /Fe:"' + $testOutput + '\behavior_tests.exe" /Fo:"' + $testOutput + '\behavior_tests.obj" tests\behavior_tests.cpp user32.lib dwmapi.lib'
     & $env:ComSpec /d /s /c $compile
@@ -85,9 +111,10 @@ try {
     & (Join-Path $testOutput 'display_tests.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Display page tests failed.' }
 
-    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_test_app.exe" /Fo:build\tests\ tests\tray_test_app.cpp src\main.cpp src\settings_window.cpp src\desktop_manager.cpp src\keyboard_hook.cpp' + $displaySources + $aboutSources + $uiLibraries + ' /link /subsystem:windows /manifest:embed'
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_test_app.exe" /Fo:build\tests\ tests\tray_test_app.cpp src\main.cpp src\settings_window.cpp src\desktop_manager.cpp src\keyboard_hook.cpp' + $displaySources + $aboutSources + $uiLibraries + ' /link /subsystem:windows /manifest:embed /manifestinput:src\app.manifest'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling isolated tray app failed.' }
+    AssertApplicationManifest (Join-Path $testOutput 'tray_test_app.exe') 'tray-test-app'
 
     # Opt-in normal-desktop Shell check; opens only its own frame, never injects global input.
     $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /Fe:"' + $testOutput + '\tray_desktop_smoke.exe" /Fo:"' + $testOutput + '\tray_desktop_smoke.obj" tests\tray_desktop_smoke.cpp user32.lib shell32.lib /link /subsystem:console'

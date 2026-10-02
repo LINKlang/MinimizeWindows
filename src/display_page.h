@@ -53,6 +53,7 @@ public:
     bool CreatePage(HWND parent, const RECT& bounds, const std::vector<std::wstring>& devices,
         SaveMonitorSelection save);
     void SetConfiguration(const std::vector<std::wstring>& devices);
+    void SetDpi(UINT dpi);
     void Refresh();
     const MonitorInfo* SelectedMonitor() const { return unavailable_selection_.empty() ? model_.Selected() : nullptr; }
     const DisplayModel& Model() const { return model_; }
@@ -124,9 +125,11 @@ private:
     std::vector<DisplayTile> tiles_;
     std::vector<InformationRow> rows_;
     UINT dpi_ = 96;
+    UINT font_dpi_ = 0;
     HFONT body_font_ = nullptr, title_font_ = nullptr, label_font_ = nullptr;
     int list_scroll_ = 0, information_scroll_ = 0, information_height_ = 0;
     RECT graph_bounds_{};
 };
 
 UINT DisplayWindowDpi(HWND window);
+BOOL DisplayAdjustWindowRectForDpi(RECT* bounds, DWORD style, BOOL menu, DWORD extended_style, UINT dpi);

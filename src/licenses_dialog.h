@@ -60,6 +60,7 @@ private:
     HFONT font_ = nullptr;
     HBRUSH background_ = nullptr, panel_ = nullptr;
     UINT dpi_ = 96;
+    UINT font_dpi_ = 0;
     bool third_party_ = true;
     int component_ = 0;
 };

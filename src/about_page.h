@@ -8,6 +8,7 @@ public:
     static constexpr UINT GitHubId = 320, LicenseId = 321, ThirdPartyId = 322, OriginalProjectId = 323;
     explicit AboutPage(LicensesDialog& licenses) : licenses_(licenses) { }
     bool CreatePage(HWND parent, const RECT& bounds);
+    void SetDpi(UINT dpi);
 
     BEGIN_MSG_MAP(AboutPage)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -40,4 +41,5 @@ private:
     LicensesDialog& licenses_;
     HFONT body_font_ = nullptr, title_font_ = nullptr, heading_font_ = nullptr;
     UINT dpi_ = 96;
+    UINT font_dpi_ = 0;
 };

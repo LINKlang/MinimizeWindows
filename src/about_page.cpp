@@ -9,6 +9,7 @@ bool AboutPage::CreatePage(HWND parent, const RECT& bounds)
 
 LRESULT AboutPage::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
 {
+    dpi_ = DisplayWindowDpi(m_hWnd);
     const wchar_t* captions[] = {L"GitHub", L"View License", L"Third-party licenses...", L"View original project"};
     for (UINT i = 0; i < ARRAYSIZE(captions); ++i) {
         if (CreateWindowExW(0, L"BUTTON", captions[i], WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -19,14 +20,18 @@ LRESULT AboutPage::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
     return 0;
 }
 
+void AboutPage::SetDpi(UINT dpi)
+{
+    dpi_ = dpi;
+    if (IsWindow()) { Layout(); }
+}
+
 void AboutPage::Layout()
 {
-    const UINT dpi = DisplayWindowDpi(m_hWnd);
-    if (body_font_ == nullptr || dpi != dpi_) {
+    if (body_font_ == nullptr || font_dpi_ != dpi_) {
         if (body_font_ != nullptr) { DeleteObject(body_font_); }
         if (title_font_ != nullptr) { DeleteObject(title_font_); }
         if (heading_font_ != nullptr) { DeleteObject(heading_font_); }
-        dpi_ = dpi;
         auto font = [this](int size, int weight) {
             return CreateFontW(-Px(size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -34,6 +39,7 @@ void AboutPage::Layout()
         body_font_ = font(14, FW_NORMAL);
         title_font_ = font(26, FW_SEMIBOLD);
         heading_font_ = font(16, FW_SEMIBOLD);
+        font_dpi_ = dpi_;
     }
     auto place = [this](UINT id, int x, int y, int width) {
         ::SetWindowPos(GetDlgItem(id), nullptr, Px(x), Px(y), Px(width), Px(32), SWP_NOZORDER | SWP_NOACTIVATE);

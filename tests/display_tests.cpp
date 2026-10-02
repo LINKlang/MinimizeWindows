@@ -19,7 +19,7 @@ bool use_real = false;
 std::wstring opened_url;
 bool browser_fails = false;
 int browser_errors = 0;
-UINT ui_dpi = 0;
+bool legacy_dpi_apis = false;
 bool control_pressed = false;
 
 HINSTANCE WINAPI OpenUrl(HWND, LPCWSTR operation, LPCWSTR url, LPCWSTR, LPCWSTR, INT)
@@ -36,7 +36,17 @@ int WINAPI LinkError(HWND, LPCWSTR text, LPCWSTR title, UINT)
     return IDOK;
 }
 
-UINT UiDpi(HWND window) { return ui_dpi != 0 ? ui_dpi : DisplayWindowDpi(window); }
+FARPROC WINAPI UiProcAddress(HMODULE module, LPCSTR name)
+{
+    if (legacy_dpi_apis && (std::strcmp(name, "GetDpiForWindow") == 0
+        || std::strcmp(name, "AdjustWindowRectExForDpi") == 0)) { return nullptr; }
+    return GetProcAddress(module, name);
+}
+
+HMODULE WINAPI UiLoadLibrary(LPCWSTR name, HANDLE file, DWORD flags)
+{
+    return legacy_dpi_apis ? nullptr : LoadLibraryExW(name, file, flags);
+}
 SHORT WINAPI UiKeyState(int key) { return key == VK_CONTROL && control_pressed ? static_cast<SHORT>(0x8000) : 0; }
 
 void Check(bool condition, const char* message)
@@ -230,16 +240,18 @@ public:
 };
 
 #define MonitorEnumerator FixtureMonitorEnumerator
+#define GetProcAddress display_test::UiProcAddress
+#define LoadLibraryExW display_test::UiLoadLibrary
 #include "../src/display_page.cpp"
+#undef LoadLibraryExW
+#undef GetProcAddress
 #undef MonitorEnumerator
 
 #define ShellExecuteW display_test::OpenUrl
 #define MessageBoxW display_test::LinkError
-#define DisplayWindowDpi display_test::UiDpi
 #define GetKeyState display_test::UiKeyState
 #include "../src/licenses_dialog.cpp"
 #include "../src/about_page.cpp"
-#undef DisplayWindowDpi
 #undef GetKeyState
 #undef MessageBoxW
 #undef ShellExecuteW
@@ -378,16 +390,160 @@ HWND AboutTests(SettingsWindow& frame, HICON icon, const std::vector<std::wstrin
     SendMessageW(dialog, WM_SYSCOMMAND, SC_CLOSE, 0);
     Check(!IsWindow(dialog), "Alt+F4 closes license viewer without ending application");
     Pump();
-    ui_dpi = 144;
-    about = GetDlgItem(frame, SettingsWindow::AboutId);
-    SetWindowPos(about, nullptr, 0, 0, 960, 696, SWP_NOZORDER | SWP_NOACTIVATE);
-    SaveClient(about, L"build\\tests\\about-150-percent.bmp");
     ClickButton(about, AboutPage::ThirdPartyId);
     dialog = FindWindowW(L"#32770", L"Third-party software licenses");
-    Check(dialog != nullptr && Bounds(dialog).right == 1080, "license layout scales to 150 percent");
-    SaveClient(dialog, L"build\\tests\\licenses-150-percent.bmp");
-    ui_dpi = 0;
+    Check(dialog != nullptr, "reopen license viewer for DPI tests");
     return dialog;
+}
+
+RECT ChildBounds(HWND window)
+{
+    RECT bounds{};
+    GetWindowRect(window, &bounds);
+    MapWindowPoints(nullptr, GetParent(window), reinterpret_cast<POINT*>(&bounds), 2);
+    return bounds;
+}
+
+void CheckFont(HWND window, UINT dpi)
+{
+    const HFONT font = reinterpret_cast<HFONT>(SendMessageW(window, WM_GETFONT, 0, 0));
+    LOGFONTW description{};
+    Check(font != nullptr && GetObjectW(font, sizeof(description), &description) == sizeof(description)
+        && description.lfHeight == -MulDiv(14, dpi, 96), "control font matches current DPI");
+}
+
+void CheckDpiLayout(SettingsWindow& frame, HWND dialog, UINT dpi, UINT dialog_dpi)
+{
+    const HWND display = GetDlgItem(frame, SettingsWindow::DisplayId);
+    const HWND about = GetDlgItem(frame, SettingsWindow::AboutId);
+    const RECT tab = ChildBounds(GetDlgItem(frame, SettingsWindow::DisplayTabId));
+    Check(tab.left == MulDiv(20, dpi, 96) && tab.top == MulDiv(10, dpi, 96)
+        && tab.right - tab.left == MulDiv(112, dpi, 96)
+        && tab.bottom - tab.top == MulDiv(38, dpi, 96), "tab geometry matches current DPI");
+    const RECT configure = ChildBounds(GetDlgItem(display, DisplayPage::ConfigureId));
+    Check(configure.left == Bounds(display).right - MulDiv(20, dpi, 96) - MulDiv(268, dpi, 96)
+        && configure.top == MulDiv(16, dpi, 96)
+        && configure.right - configure.left == MulDiv(100, dpi, 96), "Display buttons match current DPI");
+    const RECT github = ChildBounds(GetDlgItem(about, AboutPage::GitHubId));
+    Check(github.left == MulDiv(24, dpi, 96) && github.top == MulDiv(180, dpi, 96)
+        && github.right - github.left == MulDiv(100, dpi, 96), "About layout matches current DPI even when hidden");
+    CheckFont(GetDlgItem(about, AboutPage::GitHubId), dpi);
+    CheckFont(GetDlgItem(dialog, LicensesDialog::TextId), dialog_dpi);
+    const RECT metadata = ChildBounds(GetDlgItem(dialog, LicensesDialog::MetadataId));
+    Check(metadata.left == MulDiv(20, dialog_dpi, 96)
+        && metadata.top == MulDiv(80, dialog_dpi, 96), "license controls use one DPI scale");
+    MINMAXINFO minimum{};
+    SendMessageW(frame, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&minimum));
+    RECT expected{0, 0, MulDiv(640, dpi, 96), MulDiv(520, dpi, 96)};
+    DisplayAdjustWindowRectForDpi(&expected, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW, dpi);
+    Check(minimum.ptMinTrackSize.x == expected.right - expected.left
+        && minimum.ptMinTrackSize.y == expected.bottom - expected.top, "frame minimum uses current DPI");
+    SendMessageW(dialog, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&minimum));
+    expected = {0, 0, MulDiv(600, dialog_dpi, 96), MulDiv(440, dialog_dpi, 96)};
+    DisplayAdjustWindowRectForDpi(&expected, GetWindowLongW(dialog, GWL_STYLE), FALSE,
+        GetWindowLongW(dialog, GWL_EXSTYLE), dialog_dpi);
+    Check(minimum.ptMinTrackSize.x == expected.right - expected.left
+        && minimum.ptMinTrackSize.y == expected.bottom - expected.top, "license minimum uses current DPI");
+}
+
+void DpiTransitions(SettingsWindow& frame, HWND dialog)
+{
+    ClickButton(frame, SettingsWindow::DisplayTabId);
+    const HWND display = GetDlgItem(frame, SettingsWindow::DisplayId);
+    const std::wstring content = WindowText(GetDlgItem(dialog, LicensesDialog::TextId));
+    const RECT suggested{0, 0, 1600, 1280};
+    // Keep the suggested rectangle unchanged between DPI messages. DPI updates
+    // must work even when SetWindowPos does not generate a new WM_SIZE.
+    for (const UINT dpi : {96u, 144u, 192u, 96u}) {
+        SendMessageW(frame, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&suggested));
+        SendMessageW(dialog, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&suggested));
+        RECT actual{};
+        GetWindowRect(frame, &actual);
+        Check(EqualRect(&actual, &suggested), "settings applies the suggested DPI rectangle");
+        GetWindowRect(dialog, &actual);
+        Check(EqualRect(&actual, &suggested), "license viewer applies the suggested DPI rectangle");
+        CheckDpiLayout(frame, dialog, dpi, dpi);
+        Check(WindowText(GetDlgItem(display, DisplayPage::ConfigureId)) == L"Cancel"
+            && IsWindowEnabled(GetDlgItem(display, DisplayPage::SaveId)), "DPI transitions retain the editing session");
+        Check(!IsWindowVisible(GetDlgItem(frame, SettingsWindow::AboutId))
+            && WindowText(GetDlgItem(dialog, LicensesDialog::TextId)) == content, "DPI transitions retain hidden tab and license content");
+        if (dpi == 144) {
+            SaveClient(frame, L"build\\tests\\display-150-percent.bmp");
+            SaveClient(GetDlgItem(frame, SettingsWindow::AboutId), L"build\\tests\\about-150-percent.bmp");
+            SaveClient(dialog, L"build\\tests\\licenses-150-percent.bmp");
+        }
+        if (dpi == 192) { SaveClient(frame, L"build\\tests\\display-200-percent.bmp"); }
+    }
+    legacy_dpi_apis = true;
+    Check(DisplayWindowDpi(frame) == 96, "missing DPI APIs and Shcore use the GDI fallback");
+    RECT adjusted{0, 0, 800, 640}, expected = adjusted;
+    Check(AdjustWindowRectEx(&expected, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW)
+        && DisplayAdjustWindowRectForDpi(&adjusted, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW, 96)
+        && EqualRect(&adjusted, &expected), "missing DPI rectangle API uses the legacy calculation");
+    legacy_dpi_apis = false;
+}
+
+void NativeDpiTests(HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save)
+{
+    using SetContext = HANDLE (WINAPI*)(HANDLE);
+    const auto set_context = reinterpret_cast<SetContext>(GetProcAddress(GetModuleHandleW(L"user32.dll"),
+        "SetThreadDpiAwarenessContext"));
+    const HANDLE previous = set_context != nullptr
+        ? set_context(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4))) : nullptr;
+    if (previous == nullptr) { std::puts("Native PMv2 tests skipped: PMv2 is unavailable."); return; }
+    SettingsWindow frame;
+    Check(frame.Show(icon, devices, save), "create native PMv2 settings");
+    const UINT initial_dpi = DisplayWindowDpi(frame);
+    Check(Bounds(frame).right == MulDiv(800, initial_dpi, 96)
+        && Bounds(frame).bottom == MulDiv(640, initial_dpi, 96), "native PMv2 initial client dimensions");
+    ClickButton(frame, SettingsWindow::AboutTabId);
+    ClickButton(GetDlgItem(frame, SettingsWindow::AboutId), AboutPage::ThirdPartyId);
+    const HWND dialog = FindWindowW(L"#32770", L"Third-party software licenses");
+    Check(dialog != nullptr, "create native PMv2 license viewer");
+    const UINT license_dpi = DisplayWindowDpi(dialog);
+    Check(Bounds(dialog).right == MulDiv(720, license_dpi, 96)
+        && Bounds(dialog).bottom == MulDiv(580, license_dpi, 96), "native license initial client dimensions");
+    using GetBehavior = int (WINAPI*)(HWND);
+    const auto get_behavior = reinterpret_cast<GetBehavior>(GetProcAddress(GetModuleHandleW(L"user32.dll"),
+        "GetDialogDpiChangeBehavior"));
+    Check(get_behavior != nullptr && (get_behavior(dialog) & 1) != 0, "native license automatic DPI layout is disabled");
+    ClickButton(frame, SettingsWindow::DisplayTabId);
+    CheckDpiLayout(frame, dialog, initial_dpi, license_dpi);
+    SaveClient(frame, L"build\\tests\\display-native-dpi.bmp");
+    SaveClient(GetDlgItem(frame, SettingsWindow::AboutId), L"build\\tests\\about-native-dpi.bmp");
+    SaveClient(dialog, L"build\\tests\\licenses-native-dpi.bmp");
+    MonitorSnapshot snapshot;
+    Check(MonitorEnumerator().Enumerate(snapshot), "enumerate native DPI monitors");
+    std::vector<UINT> observed_dpis;
+    // Visit all physical displays and return in reverse order. No desktop is activated.
+    for (size_t step = 0; step < snapshot.monitors.size() * 2; ++step) {
+        const size_t index = step < snapshot.monitors.size() ? step : snapshot.monitors.size() * 2 - step - 1;
+        const auto& monitor = snapshot.monitors[index];
+        MONITORINFO info{sizeof(info)};
+        Check(GetMonitorInfoW(monitor.handle, &info), "read native monitor work area");
+        RECT outer{};
+        GetWindowRect(frame, &outer);
+        const int x = (info.rcWork.left + info.rcWork.right - (outer.right - outer.left)) / 2;
+        const int y = (info.rcWork.top + info.rcWork.bottom - (outer.bottom - outer.top)) / 2;
+        frame.SetWindowPos(nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(dialog, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Pump();
+        Check(MonitorFromWindow(frame, MONITOR_DEFAULTTONEAREST) == monitor.handle
+            && MonitorFromWindow(dialog, MONITOR_DEFAULTTONEAREST) == monitor.handle, "native DPI windows reach the target display");
+        const UINT dpi = DisplayWindowDpi(frame), current_license_dpi = DisplayWindowDpi(dialog);
+        CheckDpiLayout(frame, dialog, dpi, current_license_dpi);
+        if (std::find(observed_dpis.begin(), observed_dpis.end(), dpi) == observed_dpis.end()) {
+            observed_dpis.push_back(dpi);
+            std::printf("Native PMv2 UI checked at %u DPI (%u%%).\n", dpi, MulDiv(dpi, 100, 96));
+        }
+    }
+    if (std::find(observed_dpis.begin(), observed_dpis.end(), 144u) == observed_dpis.end()) {
+        std::puts("Real 150% UI check unavailable: no tested display uses 144 DPI.");
+    }
+    if (observed_dpis.size() < 2) { std::puts("Mixed-DPI check unavailable: tested displays have the same DPI."); }
+    frame.DestroyWindow();
+    Pump();
+    set_context(previous);
 }
 
 } // namespace display_test
@@ -618,6 +774,7 @@ int main()
     Check(frame.Show(icon, saved_devices, save)
         && IsWindowEnabled(GetDlgItem(integrated, DisplayPage::SaveId)), "re-activation retains an existing edit session");
     const HWND license_window = AboutTests(frame, icon, saved_devices, save);
+    DpiTransitions(frame, license_window);
     frame.DestroyWindow();
     Check(!IsWindow(license_window), "closing Settings destroys its owned license viewer");
     Pump();
@@ -628,6 +785,7 @@ int main()
         "closing discards unsaved edits and reopening returns to view mode");
     frame.DestroyWindow();
     Pump();
+    NativeDpiTests(icon, saved_devices, save);
     _Module.RemoveMessageLoop();
     _Module.Term();
     CoUninitialize();

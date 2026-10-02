@@ -102,14 +102,34 @@ UINT DisplayWindowDpi(HWND window)
 {
     using Query = UINT (WINAPI*)(HWND);
     const auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
-    if (query != nullptr) {
+    if (query != nullptr && window != nullptr) {
         const UINT dpi = query(window);
         if (dpi != 0) { return dpi; }
+    }
+    // Windows 8.1 has per-monitor DPI but no GetDpiForWindow.
+    const HMODULE shcore = LoadLibraryExW(L"Shcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (shcore != nullptr) {
+        using MonitorQuery = HRESULT (WINAPI*)(HMONITOR, int, UINT*, UINT*);
+        const auto monitor_query = reinterpret_cast<MonitorQuery>(GetProcAddress(shcore, "GetDpiForMonitor"));
+        UINT x = 0, y = 0;
+        const HRESULT result = monitor_query != nullptr
+            ? monitor_query(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY), 0 /* MDT_EFFECTIVE_DPI */, &x, &y)
+            : E_NOTIMPL;
+        FreeLibrary(shcore);
+        if (SUCCEEDED(result) && x != 0) { return x; }
     }
     const HDC dc = GetDC(window);
     const int dpi = dc != nullptr ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
     if (dc != nullptr) { ReleaseDC(window, dc); }
     return dpi > 0 ? static_cast<UINT>(dpi) : 96;
+}
+
+BOOL DisplayAdjustWindowRectForDpi(RECT* bounds, DWORD style, BOOL menu, DWORD extended_style, UINT dpi)
+{
+    using Adjust = BOOL (WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    const auto adjust = reinterpret_cast<Adjust>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    return adjust != nullptr ? adjust(bounds, style, menu, extended_style, dpi)
+        : AdjustWindowRectEx(bounds, style, menu, extended_style);
 }
 
 DisplayPage::~DisplayPage()
@@ -229,9 +249,7 @@ void DisplayPage::UpdateButtons()
 
 void DisplayPage::UpdateFonts()
 {
-    const UINT dpi = DisplayWindowDpi(m_hWnd);
-    if (dpi == dpi_ && body_font_ != nullptr) { return; }
-    dpi_ = dpi;
+    if (font_dpi_ == dpi_ && body_font_ != nullptr) { return; }
     const auto font = [&](int height, int weight) {
         return CreateFontW(-Px(height), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
@@ -242,6 +260,13 @@ void DisplayPage::UpdateFonts()
     body_font_ = font(14, FW_NORMAL);
     title_font_ = font(18, FW_SEMIBOLD);
     label_font_ = font(22, FW_NORMAL);
+    font_dpi_ = dpi_;
+}
+
+void DisplayPage::SetDpi(UINT dpi)
+{
+    dpi_ = dpi;
+    if (IsWindow()) { Layout(); }
 }
 
 void DisplayPage::Refresh()
@@ -268,6 +293,7 @@ void DisplayPage::Refresh()
 
 LRESULT DisplayPage::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
 {
+    dpi_ = DisplayWindowDpi(m_hWnd);
     UpdateFonts();
     RECT empty{};
     const DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;

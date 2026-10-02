@@ -87,6 +87,14 @@
       <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <Manifest>
+      <AdditionalManifestFiles>$(ProjectDir)..\src\app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <Manifest Include="..\src\app.manifest" />
+  </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\main.cpp" />
     <ClCompile Include="..\src\keyboard_hook.cpp" />

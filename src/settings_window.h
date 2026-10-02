@@ -52,6 +52,7 @@ private:
     AboutPage about_;
     HWND tab_ = nullptr, about_tab_ = nullptr;
     bool showing_about_ = false;
+    UINT dpi_ = 96;
     HFONT tab_font_ = nullptr;
     UINT tab_dpi_ = 0;
     WTL::CMessageLoop* loop_ = nullptr;
