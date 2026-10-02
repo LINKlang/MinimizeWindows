@@ -33,6 +33,9 @@
     <ClCompile Include="..\src\settings_window.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\settings_page.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\display_model.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -63,6 +66,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="..\src\settings_window.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\settings_page.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="..\src\wtl_support.h">

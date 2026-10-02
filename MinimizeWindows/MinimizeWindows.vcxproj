@@ -62,7 +62,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;Uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -84,7 +84,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Dwmapi.lib;Shell32.lib;Comctl32.lib;Ole32.lib;Oleaut32.lib;Uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
@@ -102,6 +102,7 @@
     <ClCompile Include="..\src\monitor_enumerator.cpp" />
     <ClCompile Include="..\src\tray_application.cpp" />
     <ClCompile Include="..\src\settings_window.cpp" />
+    <ClCompile Include="..\src\settings_page.cpp" />
     <ClCompile Include="..\src\display_model.cpp" />
     <ClCompile Include="..\src\display_page.cpp" />
     <ClCompile Include="..\src\config_store.cpp" />
@@ -114,6 +115,7 @@
     <ClInclude Include="..\src\monitor_enumerator.h" />
     <ClInclude Include="..\src\tray_application.h" />
     <ClInclude Include="..\src\settings_window.h" />
+    <ClInclude Include="..\src\settings_page.h" />
     <ClInclude Include="..\src\wtl_support.h" />
     <ClInclude Include="..\src\display_model.h" />
     <ClInclude Include="..\src\display_page.h" />

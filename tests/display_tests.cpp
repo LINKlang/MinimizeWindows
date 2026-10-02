@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <shellapi.h>
+#include <shlobj.h>
 
 WTL::CAppModule _Module;
 
@@ -21,6 +22,51 @@ bool browser_fails = false;
 int browser_errors = 0;
 bool legacy_dpi_apis = false;
 bool control_pressed = false;
+std::wstring startup_folder, startup_message;
+HRESULT startup_folder_error = S_OK;
+int startup_successes = 0, startup_errors = 0;
+std::wstring explorer_application, explorer_command;
+bool explorer_fails = false;
+HANDLE explorer_process = nullptr, explorer_thread = nullptr;
+
+BOOL WINAPI LaunchExplorer(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES process_attributes,
+    LPSECURITY_ATTRIBUTES thread_attributes, BOOL inherit, DWORD flags, LPVOID environment, LPCWSTR directory,
+    LPSTARTUPINFOW startup, LPPROCESS_INFORMATION process)
+{
+    if (application == nullptr || command == nullptr || process_attributes != nullptr || thread_attributes != nullptr
+        || inherit || flags != 0 || environment != nullptr || directory != nullptr
+        || startup->cb != sizeof(STARTUPINFOW) || startup->dwFlags != STARTF_USESHOWWINDOW
+        || startup->wShowWindow != SW_SHOWNORMAL) { std::abort(); }
+    explorer_application = application;
+    explorer_command = command;
+    if (explorer_fails) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    process->hProcess = explorer_process = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    process->hThread = explorer_thread = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (explorer_process == nullptr || explorer_thread == nullptr) { std::abort(); }
+    return TRUE;
+}
+
+HRESULT WINAPI StartupFolder(REFKNOWNFOLDERID id, DWORD flags, HANDLE token, PWSTR* path)
+{
+    if (id != FOLDERID_Startup || flags != KF_FLAG_CREATE || token != nullptr || startup_folder.empty()) { std::abort(); }
+    *path = nullptr;
+    if (FAILED(startup_folder_error)) { return startup_folder_error; }
+    const size_t bytes = (startup_folder.size() + 1) * sizeof(wchar_t);
+    *path = static_cast<PWSTR>(CoTaskMemAlloc(bytes));
+    if (*path == nullptr) { return E_OUTOFMEMORY; }
+    std::memcpy(*path, startup_folder.c_str(), bytes);
+    return S_OK;
+}
+
+int WINAPI StartupMessage(HWND, LPCWSTR text, LPCWSTR title, UINT type)
+{
+    if (std::wcscmp(title, L"MinimizeWindows") != 0) { std::abort(); }
+    startup_message = text;
+    if ((type & MB_ICONMASK) == MB_ICONINFORMATION) { ++startup_successes; }
+    else if ((type & MB_ICONMASK) == MB_ICONERROR) { ++startup_errors; }
+    else { std::abort(); }
+    return IDOK;
+}
 
 HINSTANCE WINAPI OpenUrl(HWND, LPCWSTR operation, LPCWSTR url, LPCWSTR, LPCWSTR, INT)
 {
@@ -256,6 +302,16 @@ public:
 #undef MessageBoxW
 #undef ShellExecuteW
 
+#define ShellExecuteW display_test::OpenUrl
+#define MessageBoxW display_test::StartupMessage
+#define SHGetKnownFolderPath display_test::StartupFolder
+#define CreateProcessW display_test::LaunchExplorer
+#include "../src/settings_page.cpp"
+#undef CreateProcessW
+#undef SHGetKnownFolderPath
+#undef MessageBoxW
+#undef ShellExecuteW
+
 namespace display_test {
 
 std::wstring WindowText(HWND window)
@@ -296,6 +352,108 @@ std::wstring CheckLicenseResource(UINT id, const wchar_t* path)
 void ClickButton(HWND parent, UINT id)
 {
     SendMessageW(parent, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(parent, id)));
+}
+
+void CheckStartupShortcut(const std::wstring& path)
+{
+    ATL::CComPtr<IShellLinkW> link;
+    Check(SUCCEEDED(link.CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER)), "create shortcut reader");
+    ATL::CComPtr<IPersistFile> file;
+    Check(SUCCEEDED(link.QueryInterface(&file)) && SUCCEEDED(file->Load(path.c_str(), STGM_READ)), "read actual startup shortcut");
+    wchar_t target[MAX_PATH]{}, working_directory[MAX_PATH]{}, arguments[MAX_PATH]{}, executable[MAX_PATH]{};
+    Check(GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable)) != 0
+        && SUCCEEDED(link->GetPath(target, ARRAYSIZE(target), nullptr, SLGP_RAWPATH))
+        && _wcsicmp(target, executable) == 0, "shortcut targets the current executable");
+    const std::wstring expected_directory = std::wstring(executable).substr(0, std::wstring(executable).find_last_of(L"\\/"));
+    Check(SUCCEEDED(link->GetWorkingDirectory(working_directory, ARRAYSIZE(working_directory)))
+        && _wcsicmp(working_directory, expected_directory.c_str()) == 0, "shortcut working directory is the executable directory");
+    Check(SUCCEEDED(link->GetArguments(arguments, ARRAYSIZE(arguments))) && arguments[0] == L'\0', "startup shortcut has no arguments");
+}
+
+void StartupTests(SettingsWindow& frame, HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save)
+{
+    const HWND display = GetDlgItem(frame, SettingsWindow::DisplayId);
+    const HWND settings = GetDlgItem(frame, SettingsWindow::SettingsId);
+    const HWND about = GetDlgItem(frame, SettingsWindow::AboutId);
+    Check(settings != nullptr && !IsWindowVisible(settings) && IsWindowVisible(display), "Settings starts hidden");
+    ClickButton(frame, SettingsWindow::SettingsTabId);
+    Check(IsWindowVisible(settings) && !IsWindowVisible(display) && !IsWindowVisible(about)
+        && GetFocus() == GetDlgItem(settings, SettingsPage::OpenStartupId), "Settings tab selects only its page and moves focus");
+    Check(frame.Show(icon, devices, save) && IsWindowVisible(settings), "re-activation retains Settings tab");
+    Check(WindowText(GetDlgItem(settings, SettingsPage::OpenStartupId)) == L"Open Startup Folder"
+        && WindowText(GetDlgItem(settings, SettingsPage::CreateStartupId)) == L"Create Startup Shortcut", "Startup button captions");
+    MSG tab{};
+    tab.hwnd = GetDlgItem(settings, SettingsPage::OpenStartupId);
+    tab.message = WM_KEYDOWN;
+    tab.wParam = VK_TAB;
+    SetFocus(tab.hwnd);
+    Check(frame.PreTranslateMessage(&tab) && GetFocus() == GetDlgItem(settings, SettingsPage::CreateStartupId),
+        "keyboard navigation reaches Create Startup Shortcut");
+    SaveClient(frame, L"build\\tests\\settings-minimum.bmp");
+    opened_url.clear();
+    ClickButton(settings, SettingsPage::OpenStartupId);
+    wchar_t system_windows[MAX_PATH]{};
+    Check(GetWindowsDirectoryW(system_windows, ARRAYSIZE(system_windows)) != 0, "locate system Explorer");
+    const std::wstring explorer = std::wstring(system_windows) + L"\\explorer.exe";
+    Check(explorer_application == explorer && explorer_command == L"\"" + explorer + L"\" shell:startup"
+        && opened_url.empty() && startup_errors == 0, "open Startup launches system Explorer without in-process Shell execution");
+    DWORD handle_flags = 0;
+    Check(!GetHandleInformation(explorer_process, &handle_flags) && GetLastError() == ERROR_INVALID_HANDLE
+        && !GetHandleInformation(explorer_thread, &handle_flags) && GetLastError() == ERROR_INVALID_HANDLE,
+        "Explorer process and thread handles are released without waiting");
+    explorer_fails = true;
+    ClickButton(settings, SettingsPage::OpenStartupId);
+    Check(startup_errors == 1 && startup_message == L"Unable to open the Startup folder.", "opening failure is reported");
+    explorer_fails = false;
+
+    wchar_t root[MAX_PATH]{};
+    Check(GetFullPathNameW(L"build\\tests", ARRAYSIZE(root), root, nullptr) != 0, "resolve isolated Startup test directory");
+    startup_folder = std::wstring(root) + L"\\Startup 中文 " + std::to_wstring(GetCurrentProcessId());
+    Check(GetFileAttributesW(startup_folder.c_str()) == INVALID_FILE_ATTRIBUTES, "opening Settings has not created a startup shortcut");
+    Check(CreateDirectoryW(startup_folder.c_str(), nullptr), "create isolated Unicode Startup directory");
+    const std::wstring shortcut = startup_folder + L"\\MinimizeWindows.lnk";
+    ClickButton(settings, SettingsPage::CreateStartupId);
+    Check(startup_successes == 1 && startup_message == L"Startup shortcut created or updated.", "creation reports success");
+    CheckStartupShortcut(shortcut);
+
+    // Simulate a shortcut left by a different executable location and launch arguments.
+    {
+        ATL::CComPtr<IShellLinkW> link;
+        ATL::CComPtr<IPersistFile> file;
+        wchar_t windows[MAX_PATH]{};
+        Check(GetWindowsDirectoryW(windows, ARRAYSIZE(windows)) != 0
+            && SUCCEEDED(link.CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER))
+            && SUCCEEDED(link.QueryInterface(&file)) && SUCCEEDED(file->Load(shortcut.c_str(), STGM_READ))
+            && SUCCEEDED(link->SetPath((std::wstring(windows) + L"\\explorer.exe").c_str()))
+            && SUCCEEDED(link->SetWorkingDirectory(windows)) && SUCCEEDED(link->SetArguments(L"--old"))
+            && SUCCEEDED(file->Save(shortcut.c_str(), TRUE)), "seed an outdated startup shortcut");
+    }
+    ClickButton(settings, SettingsPage::CreateStartupId);
+    Check(startup_successes == 2, "repeated creation reports success");
+    CheckStartupShortcut(shortcut);
+    WIN32_FIND_DATAW entry{};
+    const HANDLE search = FindFirstFileW((startup_folder + L"\\*.lnk").c_str(), &entry);
+    Check(search != INVALID_HANDLE_VALUE && std::wcscmp(entry.cFileName, L"MinimizeWindows.lnk") == 0
+        && !FindNextFileW(search, &entry) && GetLastError() == ERROR_NO_MORE_FILES, "repeated creation keeps only one shortcut");
+    FindClose(search);
+
+    startup_folder_error = E_ACCESSDENIED;
+    ClickButton(settings, SettingsPage::CreateStartupId);
+    Check(startup_errors == 2 && startup_successes == 2 && startup_message == L"Unable to create the startup shortcut.",
+        "Startup folder lookup failure is reported");
+    startup_folder_error = S_OK;
+    CheckStartupShortcut(shortcut);
+    Check(DeleteFileW(shortcut.c_str()) && CreateDirectoryW(shortcut.c_str(), nullptr), "block shortcut save with a directory");
+    ClickButton(settings, SettingsPage::CreateStartupId);
+    Check(startup_errors == 3 && startup_successes == 2 && startup_message == L"Unable to create the startup shortcut.",
+        "actual shortcut save failure is reported");
+    Check(RemoveDirectoryW(shortcut.c_str()) && RemoveDirectoryW(startup_folder.c_str()), "remove isolated Startup fixtures");
+    startup_folder.clear();
+    ClickButton(frame, SettingsWindow::AboutTabId);
+    Check(IsWindowVisible(about) && !IsWindowVisible(settings) && !IsWindowVisible(display), "About hides Settings");
+    ClickButton(frame, SettingsWindow::DisplayTabId);
+    Check(IsWindowVisible(display) && !IsWindowVisible(settings) && !IsWindowVisible(about)
+        && GetFocus() == GetDlgItem(display, DisplayPage::TopologyId), "Display restores its page and focus");
 }
 
 HWND AboutTests(SettingsWindow& frame, HICON icon, const std::vector<std::wstring>& devices, SaveMonitorSelection save)
@@ -416,10 +574,24 @@ void CheckDpiLayout(SettingsWindow& frame, HWND dialog, UINT dpi, UINT dialog_dp
 {
     const HWND display = GetDlgItem(frame, SettingsWindow::DisplayId);
     const HWND about = GetDlgItem(frame, SettingsWindow::AboutId);
+    const HWND settings = GetDlgItem(frame, SettingsWindow::SettingsId);
     const RECT tab = ChildBounds(GetDlgItem(frame, SettingsWindow::DisplayTabId));
     Check(tab.left == MulDiv(20, dpi, 96) && tab.top == MulDiv(10, dpi, 96)
         && tab.right - tab.left == MulDiv(112, dpi, 96)
         && tab.bottom - tab.top == MulDiv(38, dpi, 96), "tab geometry matches current DPI");
+    const RECT settings_tab = ChildBounds(GetDlgItem(frame, SettingsWindow::SettingsTabId));
+    const RECT about_tab = ChildBounds(GetDlgItem(frame, SettingsWindow::AboutTabId));
+    Check(settings_tab.left == MulDiv(140, dpi, 96) && about_tab.left == MulDiv(260, dpi, 96),
+        "navigation order is Display, Settings, About at current DPI");
+    const RECT open_startup = ChildBounds(GetDlgItem(settings, SettingsPage::OpenStartupId));
+    const RECT create_startup = ChildBounds(GetDlgItem(settings, SettingsPage::CreateStartupId));
+    Check(open_startup.left == MulDiv(24, dpi, 96) && open_startup.top == MulDiv(124, dpi, 96)
+        && open_startup.right - open_startup.left == MulDiv(240, dpi, 96)
+        && open_startup.bottom - open_startup.top == MulDiv(32, dpi, 96)
+        && create_startup.top == MulDiv(168, dpi, 96) && create_startup.right <= Bounds(settings).right,
+        "Startup buttons scale vertically without clipping even while hidden");
+    CheckFont(GetDlgItem(settings, SettingsPage::OpenStartupId), dpi);
+    CheckFont(GetDlgItem(settings, SettingsPage::CreateStartupId), dpi);
     const RECT configure = ChildBounds(GetDlgItem(display, DisplayPage::ConfigureId));
     Check(configure.left == Bounds(display).right - MulDiv(20, dpi, 96) - MulDiv(268, dpi, 96)
         && configure.top == MulDiv(16, dpi, 96)
@@ -466,6 +638,7 @@ void DpiTransitions(SettingsWindow& frame, HWND dialog)
         Check(WindowText(GetDlgItem(display, DisplayPage::ConfigureId)) == L"Cancel"
             && IsWindowEnabled(GetDlgItem(display, DisplayPage::SaveId)), "DPI transitions retain the editing session");
         Check(!IsWindowVisible(GetDlgItem(frame, SettingsWindow::AboutId))
+            && !IsWindowVisible(GetDlgItem(frame, SettingsWindow::SettingsId))
             && WindowText(GetDlgItem(dialog, LicensesDialog::TextId)) == content, "DPI transitions retain hidden tab and license content");
         if (dpi == 144) {
             SaveClient(frame, L"build\\tests\\display-150-percent.bmp");
@@ -473,6 +646,12 @@ void DpiTransitions(SettingsWindow& frame, HWND dialog)
             SaveClient(dialog, L"build\\tests\\licenses-150-percent.bmp");
         }
         if (dpi == 192) { SaveClient(frame, L"build\\tests\\display-200-percent.bmp"); }
+        ClickButton(frame, SettingsWindow::SettingsTabId);
+        Check(IsWindowVisible(GetDlgItem(frame, SettingsWindow::SettingsId)) && !IsWindowVisible(display),
+            "Settings remains selectable after DPI transitions");
+        const std::wstring screenshot = L"build\\tests\\settings-" + std::to_wstring(MulDiv(dpi, 100, 96)) + L"-percent.bmp";
+        SaveClient(frame, screenshot.c_str());
+        ClickButton(frame, SettingsWindow::DisplayTabId);
     }
     legacy_dpi_apis = true;
     Check(DisplayWindowDpi(frame) == 96, "missing DPI APIs and Shcore use the GDI fallback");
@@ -773,6 +952,7 @@ int main()
     SendMessageW(GetDlgItem(integrated, DisplayPage::ListId), WM_KEYDOWN, VK_SPACE, 0);
     Check(frame.Show(icon, saved_devices, save)
         && IsWindowEnabled(GetDlgItem(integrated, DisplayPage::SaveId)), "re-activation retains an existing edit session");
+    StartupTests(frame, icon, saved_devices, save);
     const HWND license_window = AboutTests(frame, icon, saved_devices, save);
     DpiTransitions(frame, license_window);
     frame.DestroyWindow();
@@ -780,6 +960,7 @@ int main()
     Pump();
     Check(frame.Show(icon, saved_devices, save), "closed settings can reopen with Display controls");
     Check(IsWindowVisible(GetDlgItem(frame, SettingsWindow::DisplayId))
+        && !IsWindowVisible(GetDlgItem(frame, SettingsWindow::SettingsId))
         && !IsWindowVisible(GetDlgItem(frame, SettingsWindow::AboutId)), "reopened Settings defaults to Display");
     Check(saves == before_close_saves && !IsWindowEnabled(GetDlgItem(GetDlgItem(frame, SettingsWindow::DisplayId), DisplayPage::SaveId)),
         "closing discards unsaved edits and reopening returns to view mode");

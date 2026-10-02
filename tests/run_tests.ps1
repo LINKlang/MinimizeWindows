@@ -79,9 +79,9 @@ try {
     $compile = '"' + $vcvars + '" >nul && rc /nologo /I src /fo build\tests\resources.res src\resources.rc'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling license resources failed.' }
-    $uiLibraries = ' build\tests\resources.res user32.lib gdi32.lib dwmapi.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib imm32.lib'
+    $uiLibraries = ' build\tests\resources.res user32.lib gdi32.lib dwmapi.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib uuid.lib imm32.lib'
     $displaySources = ' src\display_model.cpp src\display_page.cpp src\monitor_enumerator.cpp'
-    $aboutSources = ' src\about_page.cpp src\licenses_dialog.cpp'
+    $aboutSources = ' src\about_page.cpp src\licenses_dialog.cpp src\settings_page.cpp'
     $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE' + $uiFlags + '/Fe:"' + $testOutput + '\tray_tests.exe" /Fo:build\tests\ tests\tray_tests.cpp' + $displaySources + $aboutSources + $uiLibraries + ' /link /subsystem:console /manifest:embed'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling WTL tray tests failed.' }
@@ -116,8 +116,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Compiling isolated tray app failed.' }
     AssertApplicationManifest (Join-Path $testOutput 'tray_test_app.exe') 'tray-test-app'
 
-    # Opt-in normal-desktop Shell check; opens only its own frame, never injects global input.
-    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /Fe:"' + $testOutput + '\tray_desktop_smoke.exe" /Fo:"' + $testOutput + '\tray_desktop_smoke.obj" tests\tray_desktop_smoke.cpp user32.lib shell32.lib /link /subsystem:console'
+    # Opt-in normal-desktop Shell check; --startup also opens Explorer, never injects global input.
+    $compile = '"' + $vcvars + '" >nul && cl /nologo /EHsc /W4 /MT /DUNICODE /D_UNICODE /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /Fe:"' + $testOutput + '\tray_desktop_smoke.exe" /Fo:"' + $testOutput + '\tray_desktop_smoke.obj" tests\tray_desktop_smoke.cpp user32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uuid.lib /link /subsystem:console'
     & $env:ComSpec /d /s /c $compile
     if ($LASTEXITCODE -ne 0) { throw 'Compiling desktop tray smoke test failed.' }
 

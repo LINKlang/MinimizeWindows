@@ -4,6 +4,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <atlbase.h>
+#include <exdisp.h>
+#include <shlobj.h>
+#include <shlwapi.h>
 #include <cstdio>
 #include <cwchar>
 #include <functional>
@@ -67,11 +71,51 @@ void Notify(HWND host, UINT event)
         "could not deliver notification to the owned tray host");
 }
 
+void OpenStartup(HWND settings)
+{
+    const HWND tab = FindWindowExW(settings, nullptr, L"BUTTON", L"Settings");
+    DWORD_PTR result = 0;
+    Check(tab != nullptr && SendMessageTimeoutW(tab, BM_CLICK, 0, 0, SMTO_ABORTIFHUNG, 2000, &result) != 0,
+        "could not select Settings tab");
+    const HWND page = FindWindowExW(settings, nullptr, L"MinimizeWindows.SettingsPage", nullptr);
+    const HWND open = FindWindowExW(page, nullptr, L"BUTTON", L"Open Startup Folder");
+    Check(page != nullptr && IsWindowVisible(page) && open != nullptr, "Startup controls are unavailable");
+    Check(SendMessageTimeoutW(open, BM_CLICK, 0, 0, SMTO_ABORTIFHUNG, 2000, &result) != 0,
+        "Open Startup Folder blocked the UI thread");
+    Check(SendMessageTimeoutW(settings, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 2000, &result) != 0
+        && IsWindowEnabled(settings), "Settings stopped responding after opening Startup");
+
+    Check(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "could not initialize Shell verification");
+    struct ComApartment { ~ComApartment() { CoUninitialize(); } } apartment;
+    ATL::CComHeapPtr<wchar_t> startup;
+    Check(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Startup, 0, nullptr, &startup)), "could not locate current-user Startup");
+    ATL::CComPtr<IShellWindows> windows;
+    Check(SUCCEEDED(windows.CoCreateInstance(CLSID_ShellWindows)), "could not enumerate Explorer windows");
+    WaitFor([&] {
+        long count = 0;
+        if (FAILED(windows->get_Count(&count))) { return false; }
+        for (long i = 0; i < count; ++i) {
+            ATL::CComPtr<IDispatch> dispatch;
+            ATL::CComPtr<IWebBrowser2> browser;
+            ATL::CComBSTR url;
+            wchar_t path[MAX_PATH]{};
+            DWORD length = ARRAYSIZE(path);
+            if (SUCCEEDED(windows->Item(ATL::CComVariant(i), &dispatch)) && dispatch != nullptr
+                && SUCCEEDED(dispatch.QueryInterface(&browser)) && SUCCEEDED(browser->get_LocationURL(&url))
+                && url != nullptr && SUCCEEDED(PathCreateFromUrlW(url, path, &length, 0))
+                && _wcsicmp(path, startup) == 0) { return true; }
+        }
+        return false;
+    }, "Explorer did not open the current-user Startup folder");
+    std::puts("Open Startup Folder returned promptly, Settings remained responsive, and Explorer reached current-user Startup.");
+}
+
 } // namespace
 
 int wmain(int count, wchar_t* arguments[])
 {
-    if (count != 2) { std::fprintf(stderr, "Usage: tray_desktop_smoke.exe APP_PATH\n"); return 1; }
+    const bool startup_check = count == 3 && std::wcscmp(arguments[2], L"--startup") == 0;
+    if (count != 2 && !startup_check) { std::fprintf(stderr, "Usage: tray_desktop_smoke.exe APP_PATH [--startup]\n"); return 1; }
     try {
         ChildProcess child;
         STARTUPINFOW startup{};
@@ -113,6 +157,7 @@ int wmain(int count, wchar_t* arguments[])
             "closing settings exited the core application");
         Notify(host, WM_LBUTTONDBLCLK);
         WaitFor(opened, "settings could not reopen after close");
+        if (startup_check) { OpenStartup(settings); }
         Check(PostMessageW(host, WM_CLOSE, 0, 0) != FALSE, "could not request application shutdown");
         Check(WaitForSingleObject(child.process.hProcess, 8000) == WAIT_OBJECT_0, "shutdown did not end the process");
         DWORD exit_code = 1;

@@ -6,7 +6,7 @@ bool SettingsWindow::Show(HICON icon, const std::vector<std::wstring>& devices, 
 {
     const bool creating = !IsWindow();
     if (creating) {
-        showing_about_ = false;
+        selected_tab_ = DisplayTabId;
         configured_devices_ = devices;
         save_ = std::move(save);
         dpi_ = DisplayWindowDpi(nullptr);
@@ -50,15 +50,21 @@ LRESULT SettingsWindow::OnCreate(UINT, WPARAM, LPARAM, BOOL&)
     tab_ = CreateWindowExW(0, L"BUTTON", L"Display", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(DisplayTabId)),
         _Module.GetModuleInstance(), nullptr);
+    settings_tab_ = CreateWindowExW(0, L"BUTTON", L"Settings", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(SettingsTabId)),
+        _Module.GetModuleInstance(), nullptr);
     about_tab_ = CreateWindowExW(0, L"BUTTON", L"About", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, m_hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(AboutTabId)),
         _Module.GetModuleInstance(), nullptr);
     RECT empty{};
-    if (tab_ == nullptr || about_tab_ == nullptr || !display_.CreatePage(m_hWnd, empty, configured_devices_, save_)
-        || !about_.CreatePage(m_hWnd, empty)) { return -1; }
+    if (tab_ == nullptr || settings_tab_ == nullptr || about_tab_ == nullptr
+        || !display_.CreatePage(m_hWnd, empty, configured_devices_, save_)
+        || !settings_.CreatePage(m_hWnd, empty) || !about_.CreatePage(m_hWnd, empty)) { return -1; }
     display_.SetDlgCtrlID(DisplayId);
+    settings_.SetDlgCtrlID(SettingsId);
     about_.SetDlgCtrlID(AboutId);
     display_.SetDpi(dpi_);
+    settings_.SetDpi(dpi_);
     about_.SetDpi(dpi_);
     loop_ = _Module.GetMessageLoop();
     if (loop_ != nullptr) { loop_->AddMessageFilter(this); }
@@ -80,10 +86,16 @@ void SettingsWindow::Layout()
     const int header = MulDiv(56, dpi, 96);
     ::SetWindowPos(tab_, nullptr, MulDiv(20, dpi, 96), MulDiv(10, dpi, 96),
         MulDiv(112, dpi, 96), MulDiv(38, dpi, 96), SWP_NOZORDER | SWP_NOACTIVATE);
-    ::SetWindowPos(about_tab_, nullptr, MulDiv(140, dpi, 96), MulDiv(10, dpi, 96),
+    ::SetWindowPos(settings_tab_, nullptr, MulDiv(140, dpi, 96), MulDiv(10, dpi, 96),
+        MulDiv(112, dpi, 96), MulDiv(38, dpi, 96), SWP_NOZORDER | SWP_NOACTIVATE);
+    ::SetWindowPos(about_tab_, nullptr, MulDiv(260, dpi, 96), MulDiv(10, dpi, 96),
         MulDiv(112, dpi, 96), MulDiv(38, dpi, 96), SWP_NOZORDER | SWP_NOACTIVATE);
     if (display_.IsWindow()) {
         display_.SetWindowPos(nullptr, 0, header, client.right, (std::max<int>)(1, client.bottom - header),
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (settings_.IsWindow()) {
+        settings_.SetWindowPos(nullptr, 0, header, client.right, (std::max<int>)(1, client.bottom - header),
             SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (about_.IsWindow()) {
@@ -125,6 +137,7 @@ LRESULT SettingsWindow::OnDpiChanged(UINT, WPARAM dpi, LPARAM parameter, BOOL&)
     // Child GetDpiForWindow values can still be old while the parent handles this message.
     dpi_ = LOWORD(dpi);
     display_.SetDpi(dpi_);
+    settings_.SetDpi(dpi_);
     about_.SetDpi(dpi_);
     const auto bounds = reinterpret_cast<RECT*>(parameter);
     if (bounds != nullptr) { SetWindowPos(nullptr, bounds, SWP_NOZORDER | SWP_NOACTIVATE); }
@@ -152,8 +165,8 @@ LRESULT SettingsWindow::OnPrint(UINT, WPARAM dc, LPARAM, BOOL&) { PaintHeader(re
 LRESULT SettingsWindow::OnDrawItem(UINT, WPARAM, LPARAM parameter, BOOL& handled)
 {
     const auto draw = reinterpret_cast<DRAWITEMSTRUCT*>(parameter);
-    if (draw->CtlID != DisplayTabId && draw->CtlID != AboutTabId) { handled = FALSE; return 0; }
-    const bool selected = showing_about_ == (draw->CtlID == AboutTabId);
+    if (draw->CtlID != DisplayTabId && draw->CtlID != SettingsTabId && draw->CtlID != AboutTabId) { handled = FALSE; return 0; }
+    const bool selected = selected_tab_ == draw->CtlID;
     SetDCBrushColor(draw->hDC, selected ? RGB(42, 42, 42) : RGB(32, 32, 32));
     FillRect(draw->hDC, &draw->rcItem, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
     SetBkMode(draw->hDC, TRANSPARENT);
@@ -161,7 +174,8 @@ LRESULT SettingsWindow::OnDrawItem(UINT, WPARAM, LPARAM parameter, BOOL& handled
     const HGDIOBJ font = SelectObject(draw->hDC,
         tab_font_ != nullptr ? tab_font_ : GetStockObject(DEFAULT_GUI_FONT));
     RECT text = draw->rcItem;
-    DrawTextW(draw->hDC, draw->CtlID == DisplayTabId ? L"Display" : L"About", -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    const wchar_t* caption = draw->CtlID == DisplayTabId ? L"Display" : draw->CtlID == SettingsTabId ? L"Settings" : L"About";
+    DrawTextW(draw->hDC, caption, -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(draw->hDC, font);
     if (selected) {
         RECT accent = draw->rcItem;
@@ -179,12 +193,16 @@ LRESULT SettingsWindow::OnDrawItem(UINT, WPARAM, LPARAM parameter, BOOL& handled
 
 LRESULT SettingsWindow::OnTab(WORD, WORD id, HWND, BOOL&)
 {
-    showing_about_ = id == AboutTabId;
-    display_.ShowWindow(showing_about_ ? SW_HIDE : SW_SHOW);
-    about_.ShowWindow(showing_about_ ? SW_SHOW : SW_HIDE);
+    selected_tab_ = id;
+    display_.ShowWindow(id == DisplayTabId ? SW_SHOW : SW_HIDE);
+    settings_.ShowWindow(id == SettingsTabId ? SW_SHOW : SW_HIDE);
+    about_.ShowWindow(id == AboutTabId ? SW_SHOW : SW_HIDE);
     ::InvalidateRect(tab_, nullptr, FALSE);
+    ::InvalidateRect(settings_tab_, nullptr, FALSE);
     ::InvalidateRect(about_tab_, nullptr, FALSE);
-    ::SetFocus(showing_about_ ? about_.GetDlgItem(AboutPage::GitHubId) : display_.GetDlgItem(DisplayPage::TopologyId));
+    const HWND focus = id == DisplayTabId ? display_.GetDlgItem(DisplayPage::TopologyId)
+        : id == SettingsTabId ? settings_.GetDlgItem(SettingsPage::OpenStartupId) : about_.GetDlgItem(AboutPage::GitHubId);
+    ::SetFocus(focus);
     return 0;
 }
 
