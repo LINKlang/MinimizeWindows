@@ -1,9 +1,9 @@
 <p align="right">
-  <strong>EN</strong> | <a href="README.zh-CN.md">简</a>
+  <a href="README.md">EN</a> | <strong>简</strong>
 </p>
 
 <p align="center">
-  <img src="assets/logo.svg" alt="MinimizeWindows logo" width="160" height="160" />
+  <img src="assets/logo.svg" alt="MinimizeWindows 标志" width="160" height="160" />
 </p>
 
 <h1 align="center">MinimizeWindows</h1>
@@ -24,26 +24,26 @@
   </a>
 </p>
 
-A Windows app that makes **Win+D** work on the monitors you choose.
-Select one or more monitors to show the desktop while keeping other screens unchanged.
+一款 Windows 工具，让 **Win+D** 只影响你选择的显示器
+支持选择一个或多个显示器返回桌面，其他屏幕的窗口保持不变
 
-## Design philosophy
+## 设计理念
 
-- Mimic the native Windows "Show Desktop" behavior as closely as possible on selected monitors.
-- Keep the app small and the implementation simple.
+- 在所选显示器上尽可能还原 Windows 原生“显示桌面”的行为
+- 保持程序小巧、实现精简
 
-## Usage
+## 使用
 
-1. Run `MinimizeWindows.exe` and double-click its tray icon to open Settings.
-2. Open **Display > Configure**, click the monitors you want to include, then **Save**.
-3. Press **Win+D** to minimize windows on those monitors. When the desktop is visible, press it again to restore the most recent batch. Previously minimized windows stay minimized.
+1. 运行 `MinimizeWindows.exe`，双击托盘图标打开设置窗口
+2. 进入 **Display > Configure**，点击需要参与 Win+D 的显示器，再点击 **Save**
+3. 按 **Win+D** 最小化所选屏幕上的窗口；所选屏幕处于桌面状态时，再按一次恢复最近一批由本程序最小化的窗口，原先已经最小化的窗口不会被恢复
 
-Closing Settings keeps the app running. Right-click the tray icon and choose **Exit** to quit.
-Save an empty selection to let Windows handle Win+D normally.
+关闭设置窗口后，程序继续在后台运行。右键点击托盘图标，选择 **Exit** 退出程序
+如果不选择任何显示器，Win+D 将恢复为 Windows 的默认行为
 
-Configuration is stored in `%APPDATA%\MinimizeWindows\config.json`.
+配置文件保存在 `%APPDATA%\MinimizeWindows\config.json`
 
-## Command line
+## 命令行
 
 ```powershell
 .\MinimizeWindows.exe --list-monitors
@@ -51,35 +51,35 @@ Configuration is stored in `%APPDATA%\MinimizeWindows\config.json`.
 .\MinimizeWindows.exe --help
 ```
 
-`--monitor` selects and saves a single device. Use the device name from
-`--list-monitors`; use Settings to select multiple monitors.
+`--monitor` 用于选择并保存单个目标设备。设备名以 `--list-monitors` 的输出为准；选择多个显示器请使用设置窗口
 
 ## Roadmap
 
-- [ ] Improve detection and handling of special windows.
-- [ ] Configurable keyboard shortcuts.
+- [ ] 改进对特殊窗口的识别与处理
+- [ ] 支持自定义快捷键
 
-## Build
+## 构建
 
-Requires Visual Studio 2022 with the v143 C++ toolset, Windows 10 SDK, and C++ ATL.
-WTL and nlohmann/json are included in `third_party`.
+需要 Visual Studio 2022、v143 C++ 工具集、Windows 10 SDK 和 C++ ATL
 
-Open **Developer PowerShell for VS 2022**, change to the repository root, and run:
+WTL 和 nlohmann/json 已包含在 `third_party` 中
+
+打开 **Developer PowerShell for VS 2022**，切换到项目根目录后执行：
 
 ```powershell
 msbuild .\MinimizeWindows.sln -m -p:Configuration=Release -p:Platform=x86
 ```
 
-The executable is written to `Release\MinimizeWindows.exe`.
-Use `Configuration=Debug` for a build in `Debug\`.
+生成的程序位于 `Release\MinimizeWindows.exe`
+使用 `Configuration=Debug` 可构建到 `Debug\` 目录
 
-## Tests
+## 测试
 
 ```powershell
 powershell.exe -NoProfile -File .\tests\run_tests.ps1
 ```
 
-## Acknowledgements
+## 致谢
 
-Thanks to [deadem/minimize-windows](https://github.com/deadem/minimize-windows) for the inspiration.
-Its simple approach and readable code were a pleasure to explore and helped shape this project.
+灵感来自 [deadem/minimize-windows](https://github.com/deadem/minimize-windows)
+原项目简洁的思路和易读的代码让人赏心悦目，也直接启发了本项目的诞生，非常感谢原作者
